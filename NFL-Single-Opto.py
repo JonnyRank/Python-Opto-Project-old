@@ -8,8 +8,9 @@ points, subject to DraftKings' classic NFL contest rules.
 The script is run from the command line, specifying the path to the
 projections CSV file as an argument.
 
-Example:
-    python NFL-Single-Opto.py "C:\\path\\to\\projections.csv"
+    python NFL-Single-Opto-v2.0.py "path" -e -l -s -ndo
+    python <script> <proj file> <export to CSV> <lock players> <stack QB with WR/TE> <no DST vs Opp>
+    python NFL-Single-Opto-v2.0.py "C:\\path\\to\\projections.csv" -e -l "Josh Allen" -s -ndo
 
 Key Features:
 - Loads player data from a command-line specified CSV file.

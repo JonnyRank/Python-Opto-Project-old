@@ -1,15 +1,17 @@
 """
-DraftKings NFL Single-Lineup Optimizer.
+DraftKings NFL Multi-Lineup Optimizer.
 
 This script ingests a CSV file with player projections and uses linear
-programming to find the single optimal lineup that maximizes total projected
-points, subject to DraftKings' classic NFL contest rules.
+programming to find a specified number of unique, optimal lineups that
+maximize total projected points, subject to DraftKings' classic NFL contest rules.
 
 The script is run from the command line, specifying the path to the
 projections CSV file as an argument.
 
-Example:
-    python NFL-Single-Opto.py "C:\\path\\to\\projections.csv"
+Input Arguments:
+    python NFL-Multi-Opto-v2.0.py "path" -n -u -e -l -ndo
+    python <script> <proj file> <# of lineups> <min uniques> <export to CSV> <lock players> <no DST vs Opp>
+    python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -e -l "Josh Allen" -ndo
 
 Key Features:
 - Loads player data from a command-line specified CSV file.
@@ -17,7 +19,7 @@ Key Features:
 - Identifies unique games to enforce the "at least two games" rule.
 - Uses the PuLP library to model and solve the optimization problem.
 - Enforces constraints for salary cap, roster composition (QB, RB, WR, TE, FLEX, DST),
-  and game diversity.
+  and lineup diversity.
 - Prints a well-formatted, human-readable optimal lineup.
 """
 
@@ -155,7 +157,7 @@ def _assign_flex_positions(lineup: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
 def main() -> None:
     """Main orchestrator function for the script."""
     parser = argparse.ArgumentParser(
-        description="DraftKings NFL Single-Lineup Optimizer."
+        description="DraftKings NFL Multi-Lineup Optimizer."
     )
     parser.add_argument(
         "filepath",
@@ -163,10 +165,48 @@ def main() -> None:
         help="Path to the DraftKings projections CSV file.",
     )
     parser.add_argument(
+        "-n",
+        "--num-lineups",
+        type=int,
+        default=1,
+        help="Number of unique lineups to generate (default: 1).",
+    )
+    parser.add_argument(
+        "-u",
+        "--min-uniques",
+        type=int,
+        default=1,
+        help="Minimum number of unique players between lineups (default: 1).",
+    )
+    parser.add_argument(
         "-e",
         "--export",
         action="store_true",
-        help="Export the generated lineup to a CSV file.",
+        help="Export the generated lineups to a CSV file.",
+    )
+    parser.add_argument(
+        "-l",
+        "--lock",
+        nargs="+",
+        help="List of player names to lock into the lineup (case-insensitive).",
+    )
+    parser.add_argument(
+        "-ndo",
+        "--no-dst-opp",
+        action="store_true",
+        help="Disallow selecting a DST and any offensive player from their opponent.",
+    )
+    parser.add_argument(
+        "-x",
+        "--exclude",
+        nargs="+",
+        help="List of player names to exclude from the lineup (case-insensitive).",
+    )
+    parser.add_argument(
+        "-s",
+        "--stack",
+        action="store_true",
+        help="Stack QB with at least one WR/TE from the same team.",
     )
     args = parser.parse_args()
 
@@ -258,18 +298,100 @@ def main() -> None:
             "At_Least_Two_Games",
         )
 
-        # --- 4. Solve the Problem ---
-        print("\nSolving for the optimal lineup...")
-        prob.solve(pulp.PULP_CBC_CMD(msg=0))
-        status = pulp.LpStatus[prob.status]
+        # --- Locking Players ---
+        if args.lock:
+            print(f"\nLocking players: {args.lock}")
+            for player_name in args.lock:
+                # Case-insensitive matching
+                matches = players_df[players_df["Player"].str.lower() == player_name.lower()]
+                if matches.empty:
+                    print(f"  WARNING: Player '{player_name}' not found in projections. Skipping lock.")
+                    continue
+                
+                for idx in matches.index:
+                    prob += player_vars[idx] == 1, f"Lock_{idx}"
+                    print(f"  Locked: {players_df.loc[idx, 'Player']} (ID: {players_df.loc[idx, 'ID']})")
 
-        # --- 5. Display the results ---
-        print(f"Solver finished with status: {status}")
+        # --- Excluding Players ---
+        if args.exclude:
+            print(f"\nExcluding players: {args.exclude}")
+            for player_name in args.exclude:
+                # Case-insensitive matching
+                matches = players_df[players_df["Player"].str.lower() == player_name.lower()]
+                if matches.empty:
+                    print(f"  WARNING: Player '{player_name}' not found in projections. Skipping exclusion.")
+                    continue
+                
+                for idx in matches.index:
+                    prob += player_vars[idx] == 0, f"Exclude_{idx}"
+                    print(f"  Excluded: {players_df.loc[idx, 'Player']} (ID: {players_df.loc[idx, 'ID']})")
 
-        if status == "Optimal":
+        # --- Stacking Rule ---
+        if args.stack:
+            print("\nEnforcing 'QB + WR/TE Stack' rule...")
+            qb_players = players_df[players_df["Position"] == "QB"]
+            for qb_idx, qb_row in qb_players.iterrows():
+                team = qb_row["Team"]
+                stack_partners_indices = players_df[
+                    (players_df["Team"] == team)
+                    & (players_df["Position"].isin(["WR", "TE"]))
+                ].index
+                prob += (
+                    pulp.lpSum(player_vars[i] for i in stack_partners_indices) >= player_vars[qb_idx],
+                    f"Stack_QB_{qb_idx}_{team}",
+                )
+
+        # --- No DST vs Opponent Constraint ---
+        if args.no_dst_opp:
+            print("\nEnforcing 'No DST vs Opponent' rule...")
+            dst_players = players_df[players_df["Position"] == "DST"]
+            for dst_idx, dst_row in dst_players.iterrows():
+                opp_team = str(dst_row["Opp"]).replace("@", "")
+                # Find offensive players on the opponent team
+                opp_offense_indices = players_df[
+                    (players_df["Team"] == opp_team) & 
+                    (players_df["Position"].isin(["QB", "RB", "WR", "TE"]))
+                ].index
+                for off_idx in opp_offense_indices:
+                    prob += player_vars[dst_idx] + player_vars[off_idx] <= 1, f"No_DST_{dst_idx}_vs_Opp_{off_idx}"
+
+        # --- 4. Iterative Optimization Loop ---
+        generated_lineups_indices = []
+        max_players_can_share = ROSTER_SIZE - args.min_uniques
+        all_lineups_export_data = []
+
+        for i in range(args.num_lineups):
+            print(f"\n--- Generating Lineup #{i + 1} ---")
+
+            # Solve the problem
+            prob.solve(pulp.PULP_CBC_CMD(msg=0))
+            status = pulp.LpStatus[prob.status]
+
+            if status != "Optimal":
+                print(f"Could not find an optimal lineup. Status: {status}")
+                if i == 0:
+                    print(
+                        "This means no lineup exists that satisfies the base constraints."
+                    )
+                else:
+                    print(f"Stopped after generating {i} unique lineups.")
+                break
+
+            # Extract and store the new lineup
             selected_indices = [
                 p_idx for p_idx in player_indices if player_vars[p_idx].varValue > 0.5
             ]
+
+            # Add diversity constraint for THIS lineup to prevent it from being chosen in future iterations
+            prob += (
+                pulp.lpSum(player_vars[p_idx] for p_idx in selected_indices)
+                <= max_players_can_share,
+                f"Diversity_from_lineup_{i + 1}",
+            )
+
+            generated_lineups_indices.append(selected_indices)
+
+            # --- 5. Display the current lineup ---
             lineup_df = players_df.loc[selected_indices].copy()
             projection = lineup_df["Projection"].sum()
             salary = int(lineup_df["Salary"].sum())
@@ -278,9 +400,19 @@ def main() -> None:
             assigned_lineup = _assign_flex_positions(lineup_df)
 
             # Define display order
-            display_order = ["QB", "RB1", "RB2", "WR1", "WR2", "WR3", "TE1", "FLEX", "DST"]
+            display_order = [
+                "QB",
+                "RB1",
+                "RB2",
+                "WR1",
+                "WR2",
+                "WR3",
+                "TE1",
+                "FLEX",
+                "DST",
+            ]
 
-            print("\n--- Optimal NFL Lineup ---")
+            print(f"\n--- Optimal NFL Lineup #{i + 1} ---")
             total_ownership = lineup_df["Ownership"].sum()
             total_ceiling = lineup_df["Ceiling"].sum()
             print(f"Projection: {projection:.2f}")
@@ -310,34 +442,42 @@ def main() -> None:
 
             print("-" * 90)
 
-            # --- Export to CSV ---
+            # Collect data for export if requested
             if args.export:
-                os.makedirs(EXPORT_DIR, exist_ok=True)
-                timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-                filename = f"nfl_single_lineup_{timestamp}.csv"
-                filepath = os.path.join(EXPORT_DIR, filename)
-
-                export_data = []
                 for slot in display_order:
                     player_data = assigned_lineup.get(slot)
                     if player_data:
                         row = player_data.copy()
+                        row["Lineup_ID"] = i + 1
                         row["Slot"] = slot
-                        export_data.append(row)
+                        row["Player_ID"] = row.get("ID")
+                        all_lineups_export_data.append(row)
 
-                export_df = pd.DataFrame(export_data)
-                # Select and reorder columns for clarity
-                columns_to_export = ["Slot", "Player", "Position", "Team", "Salary", "Projection", "Ownership", "Ceiling"]
-                # Ensure columns exist before selecting
-                columns_to_export = [c for c in columns_to_export if c in export_df.columns]
-                export_df = export_df[columns_to_export]
+        # --- 5. Export All Lineups to CSV ---
+        if args.export and all_lineups_export_data:
+            os.makedirs(EXPORT_DIR, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            filename = f"nfl_multi_lineups_{timestamp}.csv"
+            filepath = os.path.join(EXPORT_DIR, filename)
 
-                export_df.to_csv(filepath, index=False)
-                print(f"\nLineup exported to: {filepath}")
+            export_df = pd.DataFrame(all_lineups_export_data)
+            columns_to_export = [
+                "Lineup_ID",
+                "Player_ID",
+                "Slot",
+                "Player",
+                "Position",
+                "Team",
+                "Salary",
+                "Projection",
+                "Ownership",
+                "Ceiling",
+            ]
+            columns_to_export = [c for c in columns_to_export if c in export_df.columns]
+            export_df = export_df[columns_to_export]
 
-        elif status == "Infeasible":
-            print("\nERROR: No solution found. The problem is infeasible.")
-            print("This means no lineup exists that satisfies all constraints.")
+            export_df.to_csv(filepath, index=False)
+            print(f"\nAll generated lineups exported to: {filepath}")
 
     except (FileNotFoundError, ValueError) as e:
         print(f"\nFATAL ERROR: {e}")

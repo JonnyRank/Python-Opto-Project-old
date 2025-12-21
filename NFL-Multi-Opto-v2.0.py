@@ -35,7 +35,8 @@ import pulp
 # --- Constants ---
 SALARY_CAP: int = 50000
 ROSTER_SIZE: int = 9
-EXPORT_DIR: str = r"G:\My Drive\Documents\NFL-DFS\csv-exports"
+EXPORT_DIR: str = r"C:\Users\jdr0824\Downloads"
+#r"G:\My Drive\Documents\NFL-DFS\csv-exports"
 
 
 def load_player_data(filepath: str) -> pd.DataFrame:
@@ -205,8 +206,17 @@ def main() -> None:
     parser.add_argument(
         "-s",
         "--stack",
+        type=int,
+        nargs="?",
+        const=1,
+        default=0,
+        help="Stack QB with at least N WR/TEs from the same team (default: 1 if flag used).",
+    )
+    parser.add_argument(
+        "-srb",
+        "--stack-rb",
         action="store_true",
-        help="Stack QB with at least one WR/TE from the same team.",
+        help="Stack QB with at least one RB from the same team.",
     )
     args = parser.parse_args()
 
@@ -326,9 +336,9 @@ def main() -> None:
                     prob += player_vars[idx] == 0, f"Exclude_{idx}"
                     print(f"  Excluded: {players_df.loc[idx, 'Player']} (ID: {players_df.loc[idx, 'ID']})")
 
-        # --- Stacking Rule ---
-        if args.stack:
-            print("\nEnforcing 'QB + WR/TE Stack' rule...")
+        # --- Stacking Rules ---
+        if args.stack > 0:
+            print(f"\nEnforcing 'QB + {args.stack} WR/TE Stack' rule...")
             qb_players = players_df[players_df["Position"] == "QB"]
             for qb_idx, qb_row in qb_players.iterrows():
                 team = qb_row["Team"]
@@ -337,8 +347,22 @@ def main() -> None:
                     & (players_df["Position"].isin(["WR", "TE"]))
                 ].index
                 prob += (
-                    pulp.lpSum(player_vars[i] for i in stack_partners_indices) >= player_vars[qb_idx],
-                    f"Stack_QB_{qb_idx}_{team}",
+                    pulp.lpSum(player_vars[i] for i in stack_partners_indices) >= args.stack * player_vars[qb_idx],
+                    f"Stack_QB_{qb_idx}_{team}_WRTE",
+                )
+
+        if args.stack_rb:
+            print("\nEnforcing 'QB + RB Stack' rule...")
+            qb_players = players_df[players_df["Position"] == "QB"]
+            for qb_idx, qb_row in qb_players.iterrows():
+                team = qb_row["Team"]
+                rb_partners_indices = players_df[
+                    (players_df["Team"] == team)
+                    & (players_df["Position"] == "RB")
+                ].index
+                prob += (
+                    pulp.lpSum(player_vars[i] for i in rb_partners_indices) >= player_vars[qb_idx],
+                    f"Stack_QB_{qb_idx}_{team}_RB",
                 )
 
         # --- No DST vs Opponent Constraint ---

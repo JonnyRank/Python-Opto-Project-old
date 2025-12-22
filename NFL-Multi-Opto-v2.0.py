@@ -35,8 +35,8 @@ import pulp
 # --- Constants ---
 SALARY_CAP: int = 50000
 ROSTER_SIZE: int = 9
-EXPORT_DIR: str = r"C:\Users\jdr0824\Downloads"
-#r"G:\My Drive\Documents\NFL-DFS\csv-exports"
+EXPORT_DIR: str = r"G:\My Drive\Documents\NFL-DFS\csv-exports"
+# John Rankin's (Dad) Downloads folder path: r"C:\Users\jdr0824\Downloads" r"C:\Users\jdr0824\Downloads"
 
 
 def load_player_data(filepath: str) -> pd.DataFrame:

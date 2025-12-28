@@ -9,8 +9,8 @@ The script is run from the command line, specifying the path to the
 projections CSV file as an argument.
 
 Input Arguments:
-    python NFL-Multi-Opto-v2.0.py "path" -n -u -e -l -s -ndo
-    python <script> <proj file> <# of lineups> <min uniques> <export to CSV> <lock players> <stack QB with WR/TE> <no DST vs Opp>
+    python NFL-Multi-Opto-v2.0.py "path" -n -u -e -te -x -l -s -ndo
+    python <script> <proj file> <# of lineups> <min uniques> <max TE> <exclude> <export to CSV> <lock players> <stack QB with WR/TE> <no DST vs Opp>
     python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -e -l "Josh Allen" -s -ndo
 
 Key Features:
@@ -218,6 +218,12 @@ def main() -> None:
         action="store_true",
         help="Stack QB with at least one RB from the same team.",
     )
+    parser.add_argument(
+        "-te",
+        "--max-te",
+        type=int,
+        help="Maximum number of TEs allowed in a lineup (e.g., 1 to ban TE in FLEX).",
+    )
     args = parser.parse_args()
 
     try:
@@ -378,6 +384,17 @@ def main() -> None:
                 ].index
                 for off_idx in opp_offense_indices:
                     prob += player_vars[dst_idx] + player_vars[off_idx] <= 1, f"No_DST_{dst_idx}_vs_Opp_{off_idx}"
+
+        # --- Max TE Constraint ---
+        if args.max_te is not None:
+            print(f"\nEnforcing maximum of {args.max_te} TE(s)...")
+            prob += (
+                pulp.lpSum(
+                    players_dict[i]["is_TE"] * player_vars[i] for i in player_indices
+                )
+                <= args.max_te,
+                "Max_TE_Constraint",
+            )
 
         # --- 4. Iterative Optimization Loop ---
         generated_lineups_indices = []

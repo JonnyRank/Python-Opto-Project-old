@@ -9,8 +9,8 @@ The script is run from the command line, specifying the path to the
 projections CSV file as an argument.
 
 Input Arguments:
-    python NFL-Multi-Opto-v2.0.py "path" -n -u -e -te -x -l -s -ndo
-    python <script> <proj file> <# of lineups> <min uniques> <max TE> <exclude> <export to CSV> <lock players> <stack QB with WR/TE> <no DST vs Opp>
+    python NFL-Multi-Opto-v2.0.py "path" -n -u -e -te -x -l -s -srb -ndo
+    python <script> <proj file> <# of lineups> <min uniques> <max TE> <exclude> <export to CSV> <lock players> <stack QB with WR/TE> <stack QB with RB> <no DST vs Opp>
     python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -e -l "Josh Allen" -s -ndo
 
 Key Features:

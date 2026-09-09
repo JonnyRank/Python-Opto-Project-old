@@ -21,6 +21,7 @@ eggs/
 # IDE / Editor specific
 .vscode/
 .idea/
+Python-Opto-Project-old.code-workspace
 
 # OS-specific
 .DS_Store

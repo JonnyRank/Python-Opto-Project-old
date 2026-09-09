@@ -40,6 +40,7 @@ Key Features:
 
 import os
 import re
+import csv
 import argparse
 import traceback
 from datetime import datetime
@@ -77,6 +78,193 @@ SLOT_FLEX: str = "FLEX"
 VALID_SLOTS: Tuple[str, str] = (SLOT_CPT, SLOT_FLEX)
 
 TABLE_WIDTH: int = 91
+
+# DraftKings entries file used to translate rostered players into the
+# "Name + ID" values DraftKings expects when a lineup is uploaded.
+DK_ENTRIES_PATH: str = r"C:\Users\jrank\Downloads\DKEntries.csv"
+# The entries file is jagged: contest entries come first and the player pool
+# section (its own header, then one row per player per slot) starts here.
+DK_POOL_START_ROW: int = 8
+# Name suffixes dropped when a projections name and a DraftKings name disagree.
+NAME_SUFFIXES: Tuple[str, ...] = ("jr", "sr", "ii", "iii", "iv", "v")
+
+# Column order of the exported CSV. The DraftKings upload row reuses the
+# columns after "Lineup_ID" as anonymous slots, one per rostered player.
+EXPORT_COLUMNS: List[str] = [
+    "Lineup_ID",
+    "Slot",
+    "Player",
+    "Position",
+    "Team",
+    "Salary",
+    "Projection",
+    "Ownership",
+    "Ceiling",
+]
+
+
+def _normalize_name(name: Any) -> str:
+    """Lowercases a name and drops punctuation so it can be matched across files."""
+    text = re.sub(r"[^a-z0-9 ]", "", str(name).lower())
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _strip_name_suffix(normalized: str) -> str:
+    """Removes a trailing generational suffix (Jr., III, ...) from a normalized name."""
+    parts = normalized.split()
+    while len(parts) > 2 and parts[-1] in NAME_SUFFIXES:
+        parts.pop()
+    return " ".join(parts)
+
+
+def load_dk_name_ids(path: str = DK_ENTRIES_PATH) -> Optional[Dict[str, Dict[str, Any]]]:
+    """
+    Indexes every player's DraftKings "Name + ID" value from the entries file.
+
+    The file is jagged: contest entries occupy the leading columns and the
+    player pool section starts at DK_POOL_START_ROW with its own header. Each
+    player appears once per roster slot, so the Captain and FLEX versions of a
+    player carry different IDs and must be looked up by slot.
+
+    Args:
+        path: Location of the DraftKings entries CSV.
+
+    Returns:
+        A dict with "by_slot" (slot + name keys), "by_name" (name keys, with
+        ambiguous names mapped to None), and "by_team" (slot + team keys, used
+        for DST rows whose names differ between the two files). Returns None
+        when the file is missing or carries no readable player pool, which
+        tells the caller to omit the DraftKings upload rows entirely.
+    """
+    if not os.path.exists(path):
+        return None
+
+    try:
+        with open(path, newline="", encoding="utf-8-sig") as handle:
+            rows = list(csv.reader(handle))
+    except OSError:
+        return None
+
+    # Find the pool header, starting at the documented row and scanning on in
+    # case a future export shifts the instructions block by a line or two.
+    # The pool's columns are read from the full row: the entry-list columns to
+    # its left are blank on every pool row, so no slicing is needed.
+    header_idx = None
+    for idx in range(max(DK_POOL_START_ROW - 1, 0), len(rows)):
+        if "Name + ID" in rows[idx]:
+            header_idx = idx
+            break
+    if header_idx is None:
+        return None
+
+    header = rows[header_idx]
+    try:
+        name_id_col = header.index("Name + ID")
+        name_col = header.index("Name")
+        slot_col = header.index("Roster Position")
+    except ValueError:
+        return None
+    team_col = header.index("TeamAbbrev") if "TeamAbbrev" in header else None
+    position_col = header.index("Position") if "Position" in header else None
+
+    by_slot: Dict[str, str] = {}
+    by_name: Dict[str, Optional[str]] = {}
+    by_team: Dict[str, str] = {}
+
+    for cells in rows[header_idx + 1 :]:
+        if len(cells) <= max(name_id_col, name_col, slot_col):
+            continue
+        name_id = cells[name_id_col].strip()
+        name = _normalize_name(cells[name_col])
+        slot = cells[slot_col].strip().upper()
+        if not name_id or not name or not slot:
+            continue
+
+        for key in {name, _strip_name_suffix(name)}:
+            by_slot.setdefault(f"{slot}|{key}", name_id)
+            # A name that resolves to more than one player is unusable on its
+            # own, so mark it ambiguous rather than guessing.
+            if key in by_name and by_name[key] != name_id:
+                by_name[key] = None
+            else:
+                by_name.setdefault(key, name_id)
+
+        is_dst = position_col is not None and cells[position_col].strip().upper() in (
+            "DST",
+            "DEF",
+            "D",
+        )
+        if is_dst and team_col is not None and len(cells) > team_col:
+            team = _normalize_name(cells[team_col])
+            if team:
+                by_team.setdefault(f"{slot}|{team}", name_id)
+
+    if not by_slot:
+        return None
+    return {"by_slot": by_slot, "by_name": by_name, "by_team": by_team}
+
+
+def lookup_dk_name_id(
+    lookup: Dict[str, Dict[str, Any]],
+    player: Any,
+    slot: Any,
+    team: Any,
+    position: Any,
+) -> Optional[str]:
+    """
+    Resolves one rostered player to its slot-specific DraftKings "Name + ID".
+
+    Tries the slot-qualified name first, then the suffix-stripped name, then an
+    unambiguous name-only match, and finally the team abbreviation for defenses
+    (DraftKings names them by nickname, projections rarely do).
+
+    Returns:
+        The "Name + ID" string, or None when no confident match exists.
+    """
+    name = _normalize_name(player)
+    slot_key = str(slot).upper()
+    candidates = [name, _strip_name_suffix(name)]
+
+    for candidate in candidates:
+        hit = lookup["by_slot"].get(f"{slot_key}|{candidate}")
+        if hit:
+            return hit
+    for candidate in candidates:
+        hit = lookup["by_name"].get(candidate)
+        if hit:
+            return hit
+    if str(position).upper() in ("DST", "DEF", "D"):
+        return lookup["by_team"].get(f"{slot_key}|{_normalize_name(team)}")
+    return None
+
+
+def build_dk_upload_values(
+    rows: List[Dict[str, Any]], lookup: Optional[Dict[str, Dict[str, Any]]]
+) -> Optional[List[str]]:
+    """
+    Converts a lineup's display rows into DraftKings "Name + ID" values.
+
+    Returns:
+        One value per roster slot in display order, or None when the entries
+        file is unavailable or any player could not be matched -- in which case
+        the caller omits the upload row for this lineup.
+    """
+    if not lookup:
+        return None
+
+    values: List[str] = []
+    for row in rows:
+        name_id = lookup_dk_name_id(
+            lookup, row["Player"], row["Slot"], row["Team"], row["Position"]
+        )
+        if not name_id:
+            print(
+                f"  NOTE: No DraftKings ID found for {row['Player']} "
+                f"({row['Slot']}); skipping the upload row for this lineup."
+            )
+            return None
+        values.append(name_id)
+    return values
 
 
 def _clean_numeric(series: pd.Series) -> pd.Series:
@@ -320,9 +508,31 @@ def build_lineup_rows(
     return rows
 
 
+def build_total_row(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Builds the summary row that follows a lineup's six roster rows in the export.
+
+    Args:
+        rows: The six display rows returned by build_lineup_rows().
+
+    Returns:
+        A row carrying the lineup's totals, with the player-identifying fields
+        left blank so the summary reads clearly in a spreadsheet.
+    """
+    return {
+        "Slot": "TOTAL",
+        "Player": "",
+        "Position": "",
+        "Team": "",
+        "Salary": sum(r["Salary"] for r in rows),
+        "Projection": sum(r["Projection"] for r in rows),
+        "Ownership": sum(r["Ownership"] for r in rows),
+        "Ceiling": sum(r["Ceiling"] for r in rows),
+    }
+
+
 def print_lineup(lineup_number: int, rows: List[Dict[str, Any]]) -> None:
     """Prints a single Showdown lineup in a human-readable table."""
-    captain_ownership = rows[0]["Ownership"]
     total_projection = sum(r["Projection"] for r in rows)
     total_ownership = sum(r["Ownership"] for r in rows)
     total_ceiling = sum(r["Ceiling"] for r in rows)
@@ -331,7 +541,6 @@ def print_lineup(lineup_number: int, rows: List[Dict[str, Any]]) -> None:
     print(f"\n--- Optimal NFL Showdown Lineup #{lineup_number} ---")
     print(f"Projection: {total_projection:.2f}")
     print(f"Total Ownership: {total_ownership:.2f}%")
-    print(f"Captain Ownership: {captain_ownership:.2f}%")
     print(f"Ceiling: {total_ceiling:.2f}")
     print(f"Salary: ${total_salary:,} (${SALARY_CAP - total_salary:,} remaining)")
     print("-" * TABLE_WIDTH)
@@ -575,6 +784,15 @@ def main() -> None:
         max_slots_can_share = ROSTER_SIZE - args.min_uniques
         all_lineups_export_data: List[Dict[str, Any]] = []
 
+        # DraftKings "Name + ID" values for the upload row that follows each
+        # lineup's totals. Absent or unreadable entries file: no upload rows.
+        dk_lookup = load_dk_name_ids() if args.export else None
+        if args.export and dk_lookup is None:
+            print(
+                f"\nNOTE: No readable DraftKings entries file at {DK_ENTRIES_PATH}. "
+                f"The export will omit the upload rows."
+            )
+
         for i in range(args.num_lineups):
             print(f"\n--- Generating Lineup #{i + 1} ---")
 
@@ -627,6 +845,17 @@ def main() -> None:
                     export_row = row.copy()
                     export_row["Lineup_ID"] = i + 1
                     all_lineups_export_data.append(export_row)
+                total_row = build_total_row(rows)
+                total_row["Lineup_ID"] = i + 1
+                all_lineups_export_data.append(total_row)
+
+                # DraftKings upload row: the same lineup laid out horizontally,
+                # one "Name + ID" per roster slot in CPT-then-FLEX order.
+                dk_values = build_dk_upload_values(rows, dk_lookup)
+                if dk_values:
+                    dk_row: Dict[str, Any] = {"Lineup_ID": i + 1}
+                    dk_row.update(zip(EXPORT_COLUMNS[1:], dk_values))
+                    all_lineups_export_data.append(dk_row)
 
         # --- 7. Export All Lineups to CSV ---
         if args.export and all_lineups_export_data:
@@ -636,24 +865,14 @@ def main() -> None:
             export_path = os.path.join(EXPORT_DIR, filename)
 
             export_df = pd.DataFrame(all_lineups_export_data)
-            columns_to_export = [
-                "Lineup_ID",
-                "Slot",
-                "Player",
-                "Position",
-                "Team",
-                "Salary",
-                "Projection",
-                "Ownership",
-                "Ceiling",
-            ]
-            export_df = export_df[
-                [c for c in columns_to_export if c in export_df.columns]
-            ]
-            # Round derived floats so the export doesn't carry binary-float noise.
+            export_df = export_df.reindex(columns=EXPORT_COLUMNS)
+            # Round derived floats so the export doesn't carry binary-float
+            # noise. The upload rows put strings in these columns, so round
+            # per value rather than over the whole column.
             for col in ["Projection", "Ownership", "Ceiling"]:
-                if col in export_df.columns:
-                    export_df[col] = export_df[col].round(2)
+                export_df[col] = export_df[col].map(
+                    lambda v: round(v, 2) if isinstance(v, float) else v
+                )
 
             export_df.to_csv(export_path, index=False)
             print(f"\nAll generated lineups exported to: {export_path}")

@@ -60,7 +60,9 @@ Classic NFL: `ID`, `Player`, `Position`, `Team`, `Opp`, `Salary`, `Proj`→`Proj
 
 Showdown: aliases are applied via `COLUMN_ALIASES` (`Pos`, `Proj`, `Total Own`, `Own`, `CPT Own`, `CPT Salary`, `CPT Proj`), first alias wins so the rename can't create duplicate columns. `Ceiling`/`Ownership`/`CptOwnership` are optional and default to 0. Ownership is slot-aware: `FlexOwnership = Total Own - CPT Own`, so the printed total is true product ownership. The file must contain exactly two teams or loading raises.
 
-Exports (`-e`) go to `EXPORT_DIR = r"G:\My Drive\Documents\NFL-DFS\csv-exports"` (NBA scripts use their own OneDrive paths), one row per roster spot with a `Lineup_ID` column, filename timestamped.
+Exports (`-e`) go to `EXPORT_DIR = r"G:\My Drive\Documents\NFL-DFS\csv-exports"` (NBA scripts use their own OneDrive paths), filename timestamped. Each lineup writes one row per roster spot, then a `TOTAL` row, then a DraftKings upload row holding only `Name + ID` values positioned into `EXPORT_COLUMNS[1:]`.
+
+The upload row is built from `DK_ENTRIES_PATH` (`~/Downloads/DKEntries.csv`), whose player pool starts at row 8 behind the jagged entry-list columns. `load_dk_name_ids()` indexes it three ways — slot+name, name alone (ambiguous names map to `None`), and slot+team for defenses — because Showdown assigns a player **different IDs at CPT and FLEX**. Anything unresolvable (missing file, unmatched player) drops just the upload row; it is never a fatal error. The two NFL multi-lineup scripts carry their own identical copy of these helpers — `patch` both or neither.
 
 ## PR workflow
 

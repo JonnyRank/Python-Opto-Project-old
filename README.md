@@ -117,10 +117,41 @@ Expected columns: `Player`, `Pos`, `Team`, `Salary`, `Proj`, plus the optional
 
 ## Exports
 
-`-e` writes one row per roster spot, with a `Lineup_ID` column identifying the lineup, to a
-timestamped file (`nfl_classic_multi_lineups_<timestamp>.csv`, `nfl_showdown_multi_lineups_<timestamp>.csv`)
-in the directory set by the `EXPORT_DIR` constant near the top of each script — currently
-`G:\My Drive\Documents\NFL-DFS\csv-exports`. Change that constant to export somewhere else.
+`-e` writes a timestamped file (`nfl_classic_multi_lineups_<timestamp>.csv`,
+`nfl_showdown_multi_lineups_<timestamp>.csv`) to the directory set by the `EXPORT_DIR`
+constant near the top of each script — currently `G:\My Drive\Documents\NFL-DFS\csv-exports`.
+Change that constant to export somewhere else.
+
+Each lineup is written as three blocks, all sharing a `Lineup_ID`:
+
+1. **One row per roster spot**, in slot order.
+2. **A `TOTAL` row** with the lineup's salary, projection, ownership, and ceiling.
+3. **A DraftKings upload row** — the same lineup laid out horizontally, holding only the
+   players' `Name + ID` values in slot order, ready to paste into a DraftKings entries file.
+
+```
+1,CPT,Drake Maye,QB,NE,15000,28.95,3.63,49.2
+1,FLEX,Jaxon Smith-Njigba,WR,SEA,10600,17.9,12.92,30.4
+...
+1,TOTAL,,,,50000,97.65,78.51,165.9
+1,Drake Maye (43782098),Jaxon Smith-Njigba (43782034),...
+```
+
+### The upload row and DKEntries.csv
+
+The `Name + ID` values are read from `C:\Users\jrank\Downloads\DKEntries.csv` (the
+`DK_ENTRIES_PATH` constant). That file is jagged: contest entries come first and the player
+pool section starts at row 8 with its own header, listing `Position`, `Name + ID`, `Name`,
+`ID`, `Roster Position`, `Salary`, `Game Info`, and `TeamAbbrev`.
+
+* Showdown players appear twice — once at `CPT` and once at `FLEX` — with **different IDs**,
+  so the Captain row and FLEX rows are looked up by slot and get the correct ID for each.
+* Names are matched case-insensitively, ignoring punctuation and generational suffixes, so
+  `AJ Brown` in your projections still finds `A.J. Brown` in the DraftKings file. Defenses
+  fall back to matching on team abbreviation, since DraftKings names them by nickname.
+* **If the file isn't there, the upload row is simply skipped** and the export continues from
+  the `TOTAL` row to the next lineup. The same happens for an individual lineup if any of its
+  players can't be matched — the script prints which player it couldn't resolve.
 
 ## When fewer lineups come back than you asked for
 

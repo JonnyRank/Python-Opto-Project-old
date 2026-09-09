@@ -498,7 +498,7 @@ def main() -> None:
         if args.export and all_lineups_export_data:
             os.makedirs(EXPORT_DIR, exist_ok=True)
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            filename = f"nfl_multi_lineups_{timestamp}.csv"
+            filename = f"nfl_classic_multi_lineups_{timestamp}.csv"
             filepath = os.path.join(EXPORT_DIR, filename)
 
             export_df = pd.DataFrame(all_lineups_export_data)

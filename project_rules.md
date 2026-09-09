@@ -9,6 +9,8 @@ This project consists of Python-based optimizers for DraftKings NFL Daily Fantas
 Key components:
 *   **Single-Lineup Optimizer**: Generates the mathematically optimal lineup for a given slate.
 *   **Multi-Lineup Optimizer**: Generates a set of unique lineups, enforcing diversity constraints.
+*   **Showdown Multi-Lineup Optimizer** (`NFL-SD-Multi-Opto-v1.0.py`): Generates unique DraftKings
+    Showdown (Captain Mode) lineups. Solved with HiGHS (via `highspy`) rather than CBC.
 
 ## CLI Instructions
 The scripts are executed via the command line using `argparse`.
@@ -31,8 +33,15 @@ In code modifications, preserve the reference comment:
 *   `-e`, `--export`: Export the generated lineup(s) to a CSV file in the configured export directory.
 *   `-l`, `--lock`: List of player names to force into the lineup (e.g., `-l "Player A" "Player B"`).
 *   `-x`, `--exclude`: List of player names to exclude from the lineup.
-*   `-s`, `--stack`: (NFL) Force a stack of QB with at least one WR/TE from the same team.
-*   `-ndo`, `--no-dst-opp`: (NFL) Prevent selecting a DST and an offensive player from the opposing team.
+*   `-s`, `--stack`: (NFL Classic) Force a stack of QB with at least one WR/TE from the same team.
+*   `-ndo`, `--no-dst-opp`: (NFL Classic) Prevent selecting a DST and an offensive player from the opposing team.
+*   `-ms`, `--max-salary`: (Showdown) Maximum total lineup salary (Default: 50000, clamped to the cap).
+
+**Showdown Notes:**
+*   Roster is 1 CPT + 5 FLEX; a player may fill only one of the two. Lineups must use both teams.
+*   `-l` / `-x` accept an optional slot suffix, e.g. `-l "Drake Maye:CPT"` or `-x "Sam Darnold:FLEX"`.
+*   `-u` counts uniqueness by roster spot, so the same six players with a different CPT counts as 2 uniques.
+*   `-s`, `-srb`, `-te`, and `-ndo` do not apply to Showdown.
 
 ## Directory Structure
 *   **Scripts**: Located in the root project folder.

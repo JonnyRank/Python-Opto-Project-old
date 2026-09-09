@@ -57,11 +57,14 @@ EXPORT_DIR: str = r"G:\My Drive\Documents\NFL-DFS\csv-exports"
 
 # Maps the header names used by the Showdown projections export to the internal
 # names used throughout this script.
+# Order matters: when a file carries more than one alias for the same internal
+# name (e.g. both "Total Own" and "Own"), the first one listed wins and the
+# rest are left untouched, so the rename can never produce duplicate columns.
 COLUMN_ALIASES: Dict[str, str] = {
     "Pos": "Position",
     "Proj": "Projection",
-    "Own": "Ownership",
     "Total Own": "Ownership",
+    "Own": "Ownership",
     "CPT Own": "CptOwnership",
     "CPT Salary": "CptSalary",
     "CPT Proj": "CptProjection",
@@ -116,11 +119,16 @@ def load_player_data(filepath: str) -> pd.DataFrame:
     print(f"Successfully loaded {len(df)} players from {os.path.basename(filepath)}.")
 
     # --- Data Cleaning and Preparation ---
-    # Rename columns for consistency (only the aliases actually present).
-    df.rename(
-        columns={k: v for k, v in COLUMN_ALIASES.items() if k in df.columns},
-        inplace=True,
-    )
+    # Rename columns for consistency, applying only the aliases actually present
+    # and never letting two of them collapse onto the same internal name.
+    rename_map: Dict[str, str] = {}
+    claimed = set(df.columns)
+    for source, target in COLUMN_ALIASES.items():
+        if source not in df.columns or target in claimed:
+            continue
+        rename_map[source] = target
+        claimed.add(target)
+    df.rename(columns=rename_map, inplace=True)
 
     required_cols = ["Player", "Position", "Team", "Salary", "Projection"]
     missing = [c for c in required_cols if c not in df.columns]
@@ -218,6 +226,26 @@ def parse_player_selector(token: str) -> Tuple[str, Optional[str]]:
         if name.strip() and suffix.strip().upper() in VALID_SLOTS:
             return name.strip(), suffix.strip().upper()
     return token.strip(), None
+
+
+def _dedupe_selectors(tokens: Sequence[str]) -> List[Tuple[str, Optional[str]]]:
+    """
+    Parses -l / -x tokens into (name, slot) pairs, dropping exact repeats.
+
+    Repeating a selector is a no-op for the model but would otherwise generate
+    two PuLP constraints with the same name, which PuLP rejects outright.
+    """
+    seen = set()
+    parsed: List[Tuple[str, Optional[str]]] = []
+    for token in tokens:
+        name, slot = parse_player_selector(token)
+        key = (name.lower(), slot)
+        if key in seen:
+            print(f"  NOTE: Ignoring repeated selector '{token}'.")
+            continue
+        seen.add(key)
+        parsed.append((name, slot))
+    return parsed
 
 
 def _find_player_indices(players_df: pd.DataFrame, player_name: str) -> pd.Index:
@@ -436,6 +464,30 @@ def main() -> None:
         # A player cannot be rostered at both Captain and FLEX
         for i in player_indices:
             prob += (cpt_vars[i] + flex_vars[i] <= 1, f"One_Slot_Per_Player_{i}")
+        # A player listed on more than one row (duplicate projections export)
+        # must still occupy at most one roster spot.
+        duplicate_groups = {
+            key: idxs
+            for key, idxs in players_df.groupby(
+                [
+                    players_df["Player"].astype(str).str.strip().str.lower(),
+                    players_df["Team"].astype(str),
+                ]
+            ).groups.items()
+            if len(idxs) > 1
+        }
+        if duplicate_groups:
+            print(
+                f"\nNOTE: {len(duplicate_groups)} player(s) appear on multiple rows. "
+                f"Constraining each to at most one roster spot:"
+            )
+            for (name, team), idxs in duplicate_groups.items():
+                print(f"  {name} ({team}) - {len(idxs)} rows")
+                prob += (
+                    pulp.lpSum(cpt_vars[i] + flex_vars[i] for i in idxs) <= 1,
+                    f"One_Row_Per_Player_{_safe_name(name)}_{_safe_name(team)}",
+                )
+
         # Lineups must include at least one player from each team
         for team in teams:
             team_indices = players_df[players_df["Team"].astype(str) == team].index
@@ -447,8 +499,7 @@ def main() -> None:
         # --- Locking Players ---
         if args.lock:
             print(f"\nLocking players: {args.lock}")
-            for token in args.lock:
-                player_name, slot = parse_player_selector(token)
+            for player_name, slot in _dedupe_selectors(args.lock):
                 matches = _find_player_indices(players_df, player_name)
                 if matches.empty:
                     print(
@@ -475,8 +526,7 @@ def main() -> None:
         # --- Excluding Players ---
         if args.exclude:
             print(f"\nExcluding players: {args.exclude}")
-            for token in args.exclude:
-                player_name, slot = parse_player_selector(token)
+            for player_name, slot in _dedupe_selectors(args.exclude):
                 matches = _find_player_indices(players_df, player_name)
                 if matches.empty:
                     print(
@@ -521,17 +571,26 @@ def main() -> None:
                 print(f"Could not find an optimal lineup. Status: {status}")
                 if i == 0:
                     print(
-                        "This means no lineup exists that satisfies the base constraints."
+                        "This means no lineup exists that satisfies the constraints."
                     )
+                    if args.lock or args.exclude or max_salary < SALARY_CAP:
+                        print(
+                            "  Check your --lock / --exclude selections and "
+                            "--max-salary; they are the usual cause."
+                        )
                 else:
                     print(f"Stopped after generating {i} unique lineups.")
                 break
 
             captain_idx = next(
-                idx for idx in player_indices if cpt_vars[idx].varValue > 0.5
+                idx
+                for idx in player_indices
+                if (cpt_vars[idx].varValue or 0) > 0.5
             )
             flex_indices = [
-                idx for idx in player_indices if flex_vars[idx].varValue > 0.5
+                idx
+                for idx in player_indices
+                if (flex_vars[idx].varValue or 0) > 0.5
             ]
 
             # Diversity constraint: this exact set of roster spots (slot-aware)

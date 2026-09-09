@@ -41,6 +41,7 @@ Key Features:
 import os
 import re
 import argparse
+import traceback
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -249,10 +250,23 @@ def _dedupe_selectors(tokens: Sequence[str]) -> List[Tuple[str, Optional[str]]]:
 
 
 def _find_player_indices(players_df: pd.DataFrame, player_name: str) -> pd.Index:
-    """Returns the DataFrame indices matching a player name, case-insensitively."""
-    return players_df[
+    """
+    Returns the DataFrame indices matching a player name, case-insensitively.
+
+    Names are matched without regard to team. Two players sharing a name on a
+    single Showdown slate is vanishingly rare, but the selector would then apply
+    to both of them, so say so rather than doing it silently.
+    """
+    matches = players_df[
         players_df["Player"].astype(str).str.strip().str.lower() == player_name.lower()
     ].index
+    teams = sorted(players_df.loc[matches, "Team"].astype(str).unique())
+    if len(teams) > 1:
+        print(
+            f"  WARNING: '{player_name}' matches players on more than one team "
+            f"({', '.join(teams)}). The selector applies to all of them."
+        )
+    return matches
 
 
 def build_lineup_rows(
@@ -647,7 +661,10 @@ def main() -> None:
     except (FileNotFoundError, ValueError) as e:
         print(f"\nFATAL ERROR: {e}")
     except Exception as e:
-        print(f"\nAn unexpected error occurred: {e}")
+        print(f"\nAn unexpected error occurred: {type(e).__name__}: {e}")
+        # Send the traceback to stderr so stdout stays clean for the lineups
+        # while a bug report still carries something actionable.
+        traceback.print_exc()
 
 
 if __name__ == "__main__":

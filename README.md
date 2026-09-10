@@ -122,6 +122,11 @@ stacks, diversity) is unchanged.
   zeros, the run stops with an explanatory error rather than quietly returning an arbitrary
   salary-feasible lineup. Projection-only runs are unaffected — a missing `Ceiling` column
   just displays as `0.00`.
+* A *partly* populated `Ceiling` column still runs, but says so. Blank or unparseable ceilings
+  become `0.00`, and the load prints how many players that affected. Under `-ceiling` those
+  players can't be rostered unless locked; under `-projceiling` they're scored on projection
+  alone. Either way a warning names them, so a quietly shrunken player pool never passes
+  unnoticed.
 * Exports tag the filename with the target (`..._ceiling_<timestamp>.csv`,
   `..._projceiling_<timestamp>.csv`) so files from different targets don't get mixed up. The
   columns inside the file are unchanged.

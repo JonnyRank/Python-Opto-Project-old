@@ -184,10 +184,14 @@ def target_value(player: Any, target: str, captain: bool) -> float:
 
 def validate_target_data(df: pd.DataFrame, target: str) -> None:
     """
-    Fails fast when a ceiling-weighted target has no ceiling data to work with.
+    Checks the ceiling data a ceiling-weighted target is about to maximize.
 
     Ceiling is optional in the projections file and defaults to zero, so an
-    all-zero column would silently return an arbitrary salary-feasible lineup.
+    all-zero column is fatal: it would silently return an arbitrary
+    salary-feasible lineup. A partly-populated column is legal but
+    consequential -- a zero ceiling is indistinguishable from a blank one once
+    filled, and those players score nothing on the ceiling half of the
+    objective -- so name them rather than letting the pool shrink invisibly.
 
     Raises:
         ValueError: If the target weights ceiling but no positive ceiling exists.
@@ -201,6 +205,22 @@ def validate_target_data(df: pd.DataFrame, target: str) -> None:
             f"projections file has no ceiling values. Re-run without "
             f"-ceiling/-projceiling to optimize on projection."
         )
+
+    zeroed = df[df["Ceiling"] <= 0]
+    if zeroed.empty:
+        return
+    consequence = (
+        "they cannot be rostered unless locked"
+        if target == TARGET_CEILING
+        else "they are scored on their projection alone"
+    )
+    names = ", ".join(str(name) for name in zeroed["Player"].head(5))
+    if len(zeroed) > 5:
+        names += f", +{len(zeroed) - 5} more"
+    print(
+        f"  WARNING: {len(zeroed)} of {len(df)} players have a zero or missing "
+        f"ceiling. Under the '{label}' target {consequence}: {names}"
+    )
 
 
 def _normalize_name(name: Any) -> str:
@@ -450,13 +470,25 @@ def load_player_data(filepath: str) -> pd.DataFrame:
         print("  NOTE: No 'CPT Own' column found. Captain ownership treated as 0.00%.")
         df["CptOwnership"] = 0.0
 
-    df["Ceiling"] = df["Ceiling"].fillna(0.0)
     df["Ownership"] = df["Ownership"].fillna(0.0)
     df["CptOwnership"] = df["CptOwnership"].fillna(0.0)
 
     # Drop players with missing critical data for optimization.
     df.dropna(subset=["Player", "Position", "Team", "Salary", "Projection"], inplace=True)
     df["Salary"] = df["Salary"].astype(int)
+
+    # Ceiling is filled only after that drop, so the count below describes the
+    # players actually available to the optimizer. A blank ceiling is not a
+    # reason to drop a player -- projection-only runs never touch the column --
+    # but it is worth saying out loud, because it becomes a real zero and the
+    # ceiling-weighted targets maximize exactly this number.
+    missing_ceiling = int(df["Ceiling"].isna().sum())
+    if missing_ceiling:
+        print(
+            f"  NOTE: {missing_ceiling} player(s) have no usable 'Ceiling' value; "
+            f"treating it as 0.00."
+        )
+    df["Ceiling"] = df["Ceiling"].fillna(0.0)
 
     # --- Derived Captain-Slot Columns ---
     # Prefer the values supplied by the projections file; fall back to the
@@ -783,8 +815,8 @@ def main() -> None:
 
         # --- 2. Load and prepare data ---
         players_df = load_player_data(args.filepath)
-        validate_target_data(players_df, target)
         print(f"Optimizing on: {target_label}.")
+        validate_target_data(players_df, target)
         players_dict = players_df.to_dict("index")
         player_indices = list(players_dict.keys())
         teams = sorted(players_df["Team"].astype(str).unique())

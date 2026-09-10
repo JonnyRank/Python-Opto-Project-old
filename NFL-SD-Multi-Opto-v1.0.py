@@ -18,17 +18,17 @@ The script is run from the command line, specifying the path to the
 projections CSV file as an argument.
 
 Input Arguments:
-    python NFL-SD-Multi-Opto-v1.0.py "path" -n -u -e -l -x -ms -ceiling -projceiling
+    python NFL-SD-Multi-Opto-v1.0.py "path" -n -u -e -l -x -ms -c -pj
     python <script> <proj file> <# of lineups> <min uniques> <export to CSV> <lock players> <exclude players> <max salary> <optimize on ceiling> <optimize on 50/50 proj+ceiling>
     # Means: python <script> <projections file> -n <number of lineups> -u <min uniques> -e <export to CSV>
     python NFL-SD-Multi-Opto-v1.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -e -l "Drake Maye:CPT" -ms 49800
-    python NFL-SD-Multi-Opto-v1.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -ceiling
-    python NFL-SD-Multi-Opto-v1.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -projceiling
+    python NFL-SD-Multi-Opto-v1.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -c
+    python NFL-SD-Multi-Opto-v1.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -pj
 
 Optimization Targets:
     (default)               Maximize total projection.
-    -ceiling / --c          Maximize total ceiling.
-    -projceiling / --pj     Maximize an equally weighted 50/50 blend of the two.
+    -c / --ceiling          Maximize total ceiling.
+    -pj / --projceiling     Maximize an equally weighted 50/50 blend of the two.
     Captain values are used for the Captain slot under every target: the
     file's "CPT Proj" / "CPT Ceiling" when present, otherwise 1.5x the FLEX
     value. The two flags are mutually exclusive; omitting both keeps the
@@ -141,11 +141,11 @@ EXPORT_COLUMNS: List[str] = [
 
 def resolve_optimization_target(use_ceiling: bool, use_blend: bool) -> str:
     """
-    Turns the -ceiling / -projceiling flags into a single target key.
+    Turns the --ceiling / --projceiling flags into a single target key.
 
     Args:
-        use_ceiling: True when -ceiling / --c was passed.
-        use_blend: True when -projceiling / --pj was passed.
+        use_ceiling: True when -c / --ceiling was passed.
+        use_blend: True when -pj / --projceiling was passed.
 
     Returns:
         One of TARGET_CEILING, TARGET_BLEND, or TARGET_PROJECTION (the default).
@@ -157,7 +157,7 @@ def resolve_optimization_target(use_ceiling: bool, use_blend: bool) -> str:
     """
     if use_ceiling and use_blend:
         raise ValueError(
-            "Choose only one optimization target: -ceiling or -projceiling."
+            "Choose only one optimization target: --ceiling or --projceiling."
         )
     if use_ceiling:
         return TARGET_CEILING
@@ -207,7 +207,7 @@ def validate_target_data(df: pd.DataFrame, target: str) -> None:
         raise ValueError(
             f"The '{label}' target needs a populated 'Ceiling' column, but the "
             f"projections file has no ceiling values. Re-run without "
-            f"-ceiling/-projceiling to optimize on projection."
+            f"--ceiling/--projceiling to optimize on projection."
         )
 
     zeroed = df[df["Ceiling"] <= 0]
@@ -793,15 +793,15 @@ def main() -> None:
     # long-standing projection-only behavior.
     target_group = parser.add_mutually_exclusive_group()
     target_group.add_argument(
-        "-ceiling",
-        "--c",
+        "-c",
+        "--ceiling",
         dest="ceiling",
         action="store_true",
         help="Optimize on ceiling instead of projection.",
     )
     target_group.add_argument(
-        "-projceiling",
-        "--pj",
+        "-pj",
+        "--projceiling",
         dest="projceiling",
         action="store_true",
         help="Optimize on an equally weighted 50/50 blend of projection and ceiling.",

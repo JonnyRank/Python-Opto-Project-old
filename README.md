@@ -39,10 +39,10 @@ venv/Scripts/python.exe NFL-Multi-Opto-v2.0.py "C:\path\to\projections.csv" -n 2
 venv/Scripts/python.exe NFL-SD-Multi-Opto-v1.0.py "C:\path\to\showdown.csv" -n 20 -u 2 -l "Drake Maye:CPT" -ms 49800 -e
 
 # 20 Classic lineups built for upside instead of median points
-venv/Scripts/python.exe NFL-Multi-Opto-v2.0.py "C:\path\to\projections.csv" -n 20 -u 2 -ceiling -e
+venv/Scripts/python.exe NFL-Multi-Opto-v2.0.py "C:\path\to\projections.csv" -n 20 -u 2 -c -e
 
 # 20 Showdown lineups on a 50/50 blend of projection and ceiling
-venv/Scripts/python.exe NFL-SD-Multi-Opto-v1.0.py "C:\path\to\showdown.csv" -n 20 -u 2 -projceiling -e
+venv/Scripts/python.exe NFL-SD-Multi-Opto-v1.0.py "C:\path\to\showdown.csv" -n 20 -u 2 -pj -e
 ```
 
 Lineups print to the terminal as a formatted table with total projection, ownership, ceiling,
@@ -64,8 +64,8 @@ and salary. Nothing is written to disk unless you pass `-e`.
 | `-srb`, `--stack-rb` | Require the QB to be paired with an RB from his own team |
 | `-te`, `--max-te` | Cap the number of TEs, e.g. `-te 1` to keep a TE out of the FLEX |
 | `-ndo`, `--no-dst-opp` | Never roster a DST alongside a QB/RB/WR/TE from the opposing team |
-| `-ceiling`, `--c` | Optimize on ceiling instead of projection |
-| `-projceiling`, `--pj` | Optimize on a 50/50 blend of projection and ceiling |
+| `-c`, `--ceiling` | Optimize on ceiling instead of projection |
+| `-pj`, `--projceiling` | Optimize on a 50/50 blend of projection and ceiling |
 
 Name matching for `-l` and `-x` is case-insensitive. A name that isn't in the projections file
 prints a warning and is skipped rather than failing the run.
@@ -86,8 +86,8 @@ two-games constraints as the multi-lineup version, without locks, stacking, or e
 | `-l`, `--lock` | Players to force into every lineup |
 | `-x`, `--exclude` | Players to keep out of every lineup |
 | `-ms`, `--max-salary` | Cap total lineup salary below $50,000 (values above the cap are clamped) |
-| `-ceiling`, `--c` | Optimize on ceiling instead of projection |
-| `-projceiling`, `--pj` | Optimize on a 50/50 blend of projection and ceiling |
+| `-c`, `--ceiling` | Optimize on ceiling instead of projection |
+| `-pj`, `--projceiling` | Optimize on a 50/50 blend of projection and ceiling |
 
 Showdown notes:
 
@@ -112,19 +112,19 @@ stacks, diversity) is unchanged.
 | Flag | What the solver maximizes |
 | --- | --- |
 | *(none)* | `Projection` — the median-points lineup, same as always |
-| `-ceiling`, `--c` | `Ceiling` — the highest-upside lineup, for GPPs |
-| `-projceiling`, `--pj` | `0.5 x Projection + 0.5 x Ceiling` — upside without abandoning floor |
+| `-c`, `--ceiling` | `Ceiling` — the highest-upside lineup, for GPPs |
+| `-pj`, `--projceiling` | `0.5 x Projection + 0.5 x Ceiling` — upside without abandoning floor |
 
 * The run prints `Optimizing on: <target>` after loading, and every lineup still prints its
-  projection, ownership, and ceiling totals. A `-projceiling` run also prints its blend score,
+  projection, ownership, and ceiling totals. A `--projceiling` run also prints its blend score,
   since that number matches neither of the printed totals.
 * Ceiling-weighted targets need real ceiling data. If the `Ceiling` column is missing or all
   zeros, the run stops with an explanatory error rather than quietly returning an arbitrary
   salary-feasible lineup. Projection-only runs are unaffected — a missing `Ceiling` column
   just displays as `0.00`.
 * A *partly* populated `Ceiling` column still runs, but says so. Blank or unparseable ceilings
-  become `0.00`, and the load prints how many players that affected. Under `-ceiling` those
-  players can't be rostered unless locked; under `-projceiling` they're scored on projection
+  become `0.00`, and the load prints how many players that affected. Under `--ceiling` those
+  players can't be rostered unless locked; under `--projceiling` they're scored on projection
   alone. Either way a warning names them, so a quietly shrunken player pool never passes
   unnoticed.
 * Exports tag the filename with the target (`..._ceiling_<timestamp>.csv`,
@@ -136,7 +136,7 @@ stacks, diversity) is unchanged.
 ### Classic
 
 Expected columns: `ID`, `Player`, `Position`, `Team`, `Opp`, `Salary`, `Proj`, `Own`, plus the
-optional `Ceiling` (required only for `-ceiling` / `-projceiling`).
+optional `Ceiling` (required only for `--ceiling` / `--projceiling`).
 
 * `Salary` may be formatted (`$6,000`) and `Own` may carry a `%` — both are cleaned on load.
 * `Opp` may be written `@BUF` or `BUF`; the `@` is stripped when pairing teams into games.
@@ -152,7 +152,7 @@ Expected columns: `Player`, `Pos`, `Team`, `Salary`, `Proj`, plus the optional
 * The file must contain exactly two teams — filter it down to the single game first, or
   loading fails with an explanatory error.
 * `CPT Salary`, `CPT Proj`, and `CPT Ceiling` are used when present; otherwise the standard
-  1.5x multiplier is applied to the FLEX values. This matters for `-ceiling`: if your source
+  1.5x multiplier is applied to the FLEX values. This matters for `--ceiling`: if your source
   publishes Captain values that aren't exactly 1.5x, supplying `CPT Ceiling` keeps the Captain
   scaled the same way under every target.
 * Ownership is slot-aware: the Captain contributes its `CPT Own` and each FLEX contributes

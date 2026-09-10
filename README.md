@@ -37,6 +37,12 @@ venv/Scripts/python.exe NFL-Multi-Opto-v2.0.py "C:\path\to\projections.csv" -n 2
 
 # 20 Showdown lineups with a locked Captain and a little salary left on the table
 venv/Scripts/python.exe NFL-SD-Multi-Opto-v1.0.py "C:\path\to\showdown.csv" -n 20 -u 2 -l "Drake Maye:CPT" -ms 49800 -e
+
+# 20 Classic lineups built for upside instead of median points
+venv/Scripts/python.exe NFL-Multi-Opto-v2.0.py "C:\path\to\projections.csv" -n 20 -u 2 -ceiling -e
+
+# 20 Showdown lineups on a 50/50 blend of projection and ceiling
+venv/Scripts/python.exe NFL-SD-Multi-Opto-v1.0.py "C:\path\to\showdown.csv" -n 20 -u 2 -projceiling -e
 ```
 
 Lineups print to the terminal as a formatted table with total projection, ownership, ceiling,
@@ -58,6 +64,8 @@ and salary. Nothing is written to disk unless you pass `-e`.
 | `-srb`, `--stack-rb` | Require the QB to be paired with an RB from his own team |
 | `-te`, `--max-te` | Cap the number of TEs, e.g. `-te 1` to keep a TE out of the FLEX |
 | `-ndo`, `--no-dst-opp` | Never roster a DST alongside a QB/RB/WR/TE from the opposing team |
+| `-ceiling`, `--c` | Optimize on ceiling instead of projection |
+| `-projceiling`, `--pj` | Optimize on a 50/50 blend of projection and ceiling |
 
 Name matching for `-l` and `-x` is case-insensitive. A name that isn't in the projections file
 prints a warning and is skipped rather than failing the run.
@@ -78,6 +86,8 @@ two-games constraints as the multi-lineup version, without locks, stacking, or e
 | `-l`, `--lock` | Players to force into every lineup |
 | `-x`, `--exclude` | Players to keep out of every lineup |
 | `-ms`, `--max-salary` | Cap total lineup salary below $50,000 (values above the cap are clamped) |
+| `-ceiling`, `--c` | Optimize on ceiling instead of projection |
+| `-projceiling`, `--pj` | Optimize on a 50/50 blend of projection and ceiling |
 
 Showdown notes:
 
@@ -90,17 +100,44 @@ Showdown notes:
 * `-u` counts uniqueness by roster spot, so the same six players with a different Captain
   counts as two uniques.
 * `-s`, `-srb`, `-te`, and `-ndo` don't apply to Showdown.
+* Under any optimization target the Captain contributes its 1.5x value, so `-ceiling` scores
+  the Captain at 1.5x ceiling.
+
+## Optimization target
+
+Both multi-lineup NFL scripts maximize **projection** by default. Two mutually exclusive
+flags swap in a different scoring target; everything else (salary cap, roster rules, locks,
+stacks, diversity) is unchanged.
+
+| Flag | What the solver maximizes |
+| --- | --- |
+| *(none)* | `Projection` — the median-points lineup, same as always |
+| `-ceiling`, `--c` | `Ceiling` — the highest-upside lineup, for GPPs |
+| `-projceiling`, `--pj` | `0.5 x Projection + 0.5 x Ceiling` — upside without abandoning floor |
+
+* The run prints `Optimizing on: <target>` after loading, and every lineup still prints its
+  projection, ownership, and ceiling totals. A `-projceiling` run also prints its blend score,
+  since that number matches neither of the printed totals.
+* Ceiling-weighted targets need real ceiling data. If the `Ceiling` column is missing or all
+  zeros, the run stops with an explanatory error rather than quietly returning an arbitrary
+  salary-feasible lineup. Projection-only runs are unaffected — a missing `Ceiling` column
+  just displays as `0.00`.
+* Exports tag the filename with the target (`..._ceiling_<timestamp>.csv`,
+  `..._projceiling_<timestamp>.csv`) so files from different targets don't get mixed up. The
+  columns inside the file are unchanged.
 
 ## Projections CSV format
 
 ### Classic
 
-Expected columns: `ID`, `Player`, `Position`, `Team`, `Opp`, `Salary`, `Proj`, `Own`, `Ceiling`.
+Expected columns: `ID`, `Player`, `Position`, `Team`, `Opp`, `Salary`, `Proj`, `Own`, plus the
+optional `Ceiling` (required only for `-ceiling` / `-projceiling`).
 
 * `Salary` may be formatted (`$6,000`) and `Own` may carry a `%` — both are cleaned on load.
 * `Opp` may be written `@BUF` or `BUF`; the `@` is stripped when pairing teams into games.
 * Rows missing `ID`, `Salary`, `Proj`, or `Position` are dropped before optimizing.
 * Every lineup is required to use players from at least two different games.
+* A missing `Ceiling` column defaults to zero and displays as `0.00`.
 
 ### Showdown
 
@@ -118,7 +155,8 @@ Expected columns: `Player`, `Pos`, `Team`, `Salary`, `Proj`, plus the optional
 ## Exports
 
 `-e` writes a timestamped file (`nfl_classic_multi_lineups_<timestamp>.csv`,
-`nfl_showdown_multi_lineups_<timestamp>.csv`) to the directory set by the `EXPORT_DIR`
+`nfl_showdown_multi_lineups_<timestamp>.csv`, with `_ceiling` / `_projceiling` inserted before
+the timestamp when one of those targets is used) to the directory set by the `EXPORT_DIR`
 constant near the top of each script — currently `G:\My Drive\Documents\NFL-DFS\csv-exports`.
 Change that constant to export somewhere else.
 

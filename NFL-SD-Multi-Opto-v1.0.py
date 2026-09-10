@@ -29,13 +29,14 @@ Optimization Targets:
     (default)               Maximize total projection.
     -ceiling / --c          Maximize total ceiling.
     -projceiling / --pj     Maximize an equally weighted 50/50 blend of the two.
-    Captain values are used for the Captain slot under every target, so a
-    ceiling-optimized Captain contributes its 1.5x ceiling. The two flags are
-    mutually exclusive; omitting both keeps the projection-only behavior.
+    Captain values are used for the Captain slot under every target: the
+    file's "CPT Proj" / "CPT Ceiling" when present, otherwise 1.5x the FLEX
+    value. The two flags are mutually exclusive; omitting both keeps the
+    projection-only behavior.
 
 Key Features:
-- Loads Showdown player data (CPT salary / CPT projection / CPT ownership) from
-  a command-line specified CSV file.
+- Loads Showdown player data (CPT salary / CPT projection / CPT ceiling / CPT
+  ownership) from a command-line specified CSV file.
 - Cleans and validates player salary, projection, and ownership data.
 - Models the Captain and FLEX slots as separate binary decisions per player.
 - Uses the HiGHS solver (via highspy) through PuLP to solve each lineup.
@@ -81,6 +82,7 @@ COLUMN_ALIASES: Dict[str, str] = {
     "CPT Own": "CptOwnership",
     "CPT Salary": "CptSalary",
     "CPT Proj": "CptProjection",
+    "CPT Ceiling": "CptCeiling",
 }
 
 # Valid slot qualifiers for the -l / -x arguments, e.g. "Drake Maye:CPT".
@@ -149,7 +151,9 @@ def resolve_optimization_target(use_ceiling: bool, use_blend: bool) -> str:
         One of TARGET_CEILING, TARGET_BLEND, or TARGET_PROJECTION (the default).
 
     Raises:
-        ValueError: If both flags were somehow supplied together.
+        ValueError: If both flags are supplied together. argparse's mutually
+            exclusive group rejects that first, so a user never reaches this;
+            it keeps the helper correct when called outside main().
     """
     if use_ceiling and use_blend:
         raise ValueError(
@@ -455,6 +459,7 @@ def load_player_data(filepath: str) -> pd.DataFrame:
         "CptOwnership",
         "CptSalary",
         "CptProjection",
+        "CptCeiling",
     ]:
         if col in df.columns:
             df[col] = _clean_numeric(df[col])
@@ -506,8 +511,15 @@ def load_player_data(filepath: str) -> pd.DataFrame:
     else:
         df["CptProjection"] = df["Projection"] * CAPTAIN_MULTIPLIER
 
-    # No Captain ceiling is published, so derive it from the 1.5x multiplier.
-    df["CptCeiling"] = df["Ceiling"] * CAPTAIN_MULTIPLIER
+    # Prefer a published "CPT Ceiling" and fall back to the 1.5x multiplier,
+    # the same precedence CptSalary and CptProjection use. This matters now
+    # that ceiling feeds the objective: a source whose Captain values are not
+    # exactly 1.5x would otherwise have its Captain scaled one way under the
+    # projection target and another under the ceiling target.
+    if "CptCeiling" in df.columns:
+        df["CptCeiling"] = df["CptCeiling"].fillna(df["Ceiling"] * CAPTAIN_MULTIPLIER)
+    else:
+        df["CptCeiling"] = df["Ceiling"] * CAPTAIN_MULTIPLIER
 
     # Slot-aware ownership: "Total Own" already includes "CPT Own", so a player's
     # FLEX-only ownership is the difference between the two.

@@ -110,7 +110,9 @@ def resolve_optimization_target(use_ceiling: bool, use_blend: bool) -> str:
         One of TARGET_CEILING, TARGET_BLEND, or TARGET_PROJECTION (the default).
 
     Raises:
-        ValueError: If both flags were somehow supplied together.
+        ValueError: If both flags are supplied together. argparse's mutually
+            exclusive group rejects that first, so a user never reaches this;
+            it keeps the helper correct when called outside main().
     """
     if use_ceiling and use_blend:
         raise ValueError(

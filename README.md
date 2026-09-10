@@ -100,8 +100,8 @@ Showdown notes:
 * `-u` counts uniqueness by roster spot, so the same six players with a different Captain
   counts as two uniques.
 * `-s`, `-srb`, `-te`, and `-ndo` don't apply to Showdown.
-* Under any optimization target the Captain contributes its 1.5x value, so `-ceiling` scores
-  the Captain at 1.5x ceiling.
+* Under any optimization target the Captain contributes its Captain-slot value — the file's
+  `CPT Proj` / `CPT Ceiling` when present, otherwise 1.5x the FLEX value.
 
 ## Optimization target
 
@@ -147,12 +147,14 @@ optional `Ceiling` (required only for `-ceiling` / `-projceiling`).
 ### Showdown
 
 Expected columns: `Player`, `Pos`, `Team`, `Salary`, `Proj`, plus the optional
-`Ceiling`, `Total Own`, `CPT Own`, `CPT Salary`, and `CPT Proj`.
+`Ceiling`, `Total Own`, `CPT Own`, `CPT Salary`, `CPT Proj`, and `CPT Ceiling`.
 
 * The file must contain exactly two teams — filter it down to the single game first, or
   loading fails with an explanatory error.
-* `CPT Salary` and `CPT Proj` are used when present; otherwise the standard 1.5x multiplier
-  is applied to the FLEX values.
+* `CPT Salary`, `CPT Proj`, and `CPT Ceiling` are used when present; otherwise the standard
+  1.5x multiplier is applied to the FLEX values. This matters for `-ceiling`: if your source
+  publishes Captain values that aren't exactly 1.5x, supplying `CPT Ceiling` keeps the Captain
+  scaled the same way under every target.
 * Ownership is slot-aware: the Captain contributes its `CPT Own` and each FLEX contributes
   `Total Own - CPT Own`, so the printed total is true product ownership for the exact lineup.
 * Missing `Ceiling` / `Total Own` / `CPT Own` columns default to zero and display as `0.00`.

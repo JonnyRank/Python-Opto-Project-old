@@ -685,10 +685,13 @@ def print_lineup(
 
     print(f"\n--- Optimal NFL Showdown Lineup #{lineup_number} ---")
     if target == TARGET_BLEND:
-        label = OPTIMIZATION_TARGETS[target][0]
+        # The weights come from OPTIMIZATION_TARGETS, the same place the
+        # objective reads them, so a retuned blend can never print one number
+        # while the solver maximizes another.
+        label, proj_weight, ceiling_weight = OPTIMIZATION_TARGETS[target]
         print(
             f"Blend Score ({label}): "
-            f"{0.5 * total_projection + 0.5 * total_ceiling:.2f}"
+            f"{proj_weight * total_projection + ceiling_weight * total_ceiling:.2f}"
         )
     print(f"Projection: {total_projection:.2f}")
     print(f"Total Ownership: {total_ownership:.2f}%")

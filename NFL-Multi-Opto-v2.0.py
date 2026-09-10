@@ -825,9 +825,13 @@ def main() -> None:
             total_ceiling = lineup_df["Ceiling"].sum()
             # A blended run's score matches neither printed total, so show it;
             # for the other targets the Projection/Ceiling lines already are it.
+            # The weights come from OPTIMIZATION_TARGETS, the same place the
+            # objective reads them, so a retuned blend can never print one
+            # number while the solver maximizes another.
             if target == TARGET_BLEND:
+                _, proj_weight, ceiling_weight = OPTIMIZATION_TARGETS[target]
                 print(f"Blend Score ({target_label}): "
-                      f"{0.5 * projection + 0.5 * total_ceiling:.2f}")
+                      f"{proj_weight * projection + ceiling_weight * total_ceiling:.2f}")
             print(f"Projection: {projection:.2f}")
             print(f"Ownership: {total_ownership:.2f}%")
             print(f"Ceiling: {total_ceiling:.2f}")

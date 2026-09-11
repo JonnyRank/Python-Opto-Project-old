@@ -3,21 +3,32 @@ DraftKings NFL Multi-Lineup Optimizer.
 
 This script ingests a CSV file with player projections and uses linear
 programming to find a specified number of unique, optimal lineups that
-maximize total projected points, subject to DraftKings' classic NFL contest rules.
+maximize a chosen scoring target (projection, ceiling, or a 50/50 mix of the
+two), subject to DraftKings' classic NFL contest rules.
 
 The script is run from the command line, specifying the path to the
 projections CSV file as an argument.
 
 Input Arguments:
-    python NFL-Multi-Opto-v2.0.py "path" -n -u -e -te -x -l -s -srb -ndo
-    python <script> <proj file> <# of lineups> <min uniques> <max TE> <exclude> <export to CSV> <lock players> <stack QB with WR/TE> <stack QB with RB> <no DST vs Opp>
+    python NFL-Multi-Opto-v2.0.py "path" -n -u -e -te -x -l -s -srb -ndo -c -pj
+    python <script> <proj file> <# of lineups> <min uniques> <max TE> <exclude> <export to CSV> <lock players> <stack QB with WR/TE> <stack QB with RB> <no DST vs Opp> <optimize on ceiling> <optimize on 50/50 proj+ceiling>
     python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -e -l "Josh Allen" -s -ndo
+    python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -c
+    python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -pj
+
+Optimization Targets:
+    (default)               Maximize total projection.
+    -c / --ceiling          Maximize total ceiling.
+    -pj / --projceiling     Maximize an equally weighted 50/50 blend of the two.
+    The two flags are mutually exclusive; omitting both keeps the historical
+    projection-only behavior.
 
 Key Features:
 - Loads player data from a command-line specified CSV file.
 - Cleans and validates player salary, projection, and ownership data.
 - Identifies unique games to enforce the "at least two games" rule.
 - Uses the PuLP library to model and solve the optimization problem.
+- Optimizes on projection, ceiling, or a 50/50 blend of the two.
 - Enforces constraints for salary cap, roster composition (QB, RB, WR, TE, FLEX, DST),
   and lineup diversity.
 - Prints a well-formatted, human-readable optimal lineup.
@@ -36,6 +47,29 @@ import pulp
 # --- Constants ---
 SALARY_CAP: int = 50000
 ROSTER_SIZE: int = 9
+
+# --- Optimization Targets ---
+# Each target weights the per-player "Projection" and "Ceiling" columns into
+# the single value the solver maximizes. Projection-only is the default and
+# reproduces the behavior this script had before the other targets existed.
+TARGET_PROJECTION: str = "projection"
+TARGET_CEILING: str = "ceiling"
+TARGET_BLEND: str = "blend"
+
+# target -> (label for output, projection weight, ceiling weight)
+OPTIMIZATION_TARGETS: Dict[str, Tuple[str, float, float]] = {
+    TARGET_PROJECTION: ("Projection", 1.0, 0.0),
+    TARGET_CEILING: ("Ceiling", 0.0, 1.0),
+    TARGET_BLEND: ("50/50 Projection + Ceiling", 0.5, 0.5),
+}
+
+# Suffix added to the export filename so a run's target is obvious on disk.
+TARGET_FILE_SUFFIXES: Dict[str, str] = {
+    TARGET_PROJECTION: "",
+    TARGET_CEILING: "_ceiling",
+    TARGET_BLEND: "_projceiling",
+}
+
 EXPORT_DIR: str = r"G:\My Drive\Documents\NFL-DFS\csv-exports"
 
 # DraftKings entries file used to translate rostered players into the
@@ -62,6 +96,81 @@ EXPORT_COLUMNS: List[str] = [
     "Ceiling",
 ]
 # John Rankin's (Dad) Downloads folder path: r"C:\Users\jdr0824\Downloads" r"C:\Users\jdr0824\Downloads"
+
+
+def resolve_optimization_target(use_ceiling: bool, use_blend: bool) -> str:
+    """
+    Turns the --ceiling / --projceiling flags into a single target key.
+
+    Args:
+        use_ceiling: True when -c / --ceiling was passed.
+        use_blend: True when -pj / --projceiling was passed.
+
+    Returns:
+        One of TARGET_CEILING, TARGET_BLEND, or TARGET_PROJECTION (the default).
+
+    Raises:
+        ValueError: If both flags are supplied together. argparse's mutually
+            exclusive group rejects that first, so a user never reaches this;
+            it keeps the helper correct when called outside main().
+    """
+    if use_ceiling and use_blend:
+        raise ValueError(
+            "Choose only one optimization target: --ceiling or --projceiling."
+        )
+    if use_ceiling:
+        return TARGET_CEILING
+    if use_blend:
+        return TARGET_BLEND
+    return TARGET_PROJECTION
+
+
+def target_value(player: Dict[str, Any], target: str) -> float:
+    """Returns the value the solver maximizes for one player under `target`."""
+    _, proj_weight, ceiling_weight = OPTIMIZATION_TARGETS[target]
+    return proj_weight * float(player["Projection"]) + ceiling_weight * float(
+        player["Ceiling"]
+    )
+
+
+def validate_target_data(df: pd.DataFrame, target: str) -> None:
+    """
+    Checks the ceiling data a ceiling-weighted target is about to maximize.
+
+    An all-zero Ceiling column is fatal: optimizing on it would silently return
+    an arbitrary salary-feasible lineup. A partly-populated column is legal but
+    consequential -- a zero ceiling is indistinguishable from a blank one once
+    filled, and those players score nothing on the ceiling half of the
+    objective -- so name them rather than letting the pool shrink invisibly.
+
+    Raises:
+        ValueError: If the target weights ceiling but no positive ceiling exists.
+    """
+    label, _, ceiling_weight = OPTIMIZATION_TARGETS[target]
+    if ceiling_weight == 0:
+        return
+    if "Ceiling" not in df.columns or not (df["Ceiling"] > 0).any():
+        raise ValueError(
+            f"The '{label}' target needs a populated 'Ceiling' column, but the "
+            f"projections file has no ceiling values. Re-run without "
+            f"--ceiling/--projceiling to optimize on projection."
+        )
+
+    zeroed = df[df["Ceiling"] <= 0]
+    if zeroed.empty:
+        return
+    consequence = (
+        "they cannot be rostered unless locked"
+        if target == TARGET_CEILING
+        else "they are scored on their projection alone"
+    )
+    names = ", ".join(str(name) for name in zeroed["Player"].head(5))
+    if len(zeroed) > 5:
+        names += f", +{len(zeroed) - 5} more"
+    print(
+        f"  WARNING: {len(zeroed)} of {len(df)} players have a zero or missing "
+        f"ceiling. Under the '{label}' target {consequence}: {names}"
+    )
 
 
 def _normalize_name(name: Any) -> str:
@@ -284,10 +393,36 @@ def load_player_data(filepath: str) -> pd.DataFrame:
         .pipe(pd.to_numeric, errors="coerce")
     )
 
+    # Ceiling drives the --ceiling / --projceiling targets and the printed
+    # totals, but it is optional: a file without it still optimizes on
+    # projection.
+    if "Ceiling" not in df.columns:
+        print("  NOTE: No 'Ceiling' column found. Ceiling values will display as 0.00.")
+        df["Ceiling"] = 0.0
+    df["Ceiling"] = (
+        df["Ceiling"]
+        .astype(str)
+        .str.replace(r"[\$,%\s]", "", regex=True)
+        .pipe(pd.to_numeric, errors="coerce")
+    )
+
     # Drop players with missing critical data for optimization
     critical_cols = ["ID", "Salary", "Projection", "Position"]
     df.dropna(subset=critical_cols, inplace=True)
     df["ID"] = df["ID"].astype(int)
+
+    # Ceiling is filled only after that drop, so the count below describes the
+    # players actually available to the optimizer. A blank ceiling is not a
+    # reason to drop a player -- projection-only runs never touch the column --
+    # but it is worth saying out loud, because it becomes a real zero and the
+    # ceiling-weighted targets maximize exactly this number.
+    missing_ceiling = int(df["Ceiling"].isna().sum())
+    if missing_ceiling:
+        print(
+            f"  NOTE: {missing_ceiling} player(s) have no usable 'Ceiling' value; "
+            f"treating it as 0.00."
+        )
+    df["Ceiling"] = df["Ceiling"].fillna(0.0)
 
     # --- Game Identification ---
     def get_game_id(row: pd.Series) -> FrozenSet[str]:
@@ -424,11 +559,34 @@ def main() -> None:
         type=int,
         help="Maximum number of TEs allowed in a lineup (e.g., 1 to ban TE in FLEX).",
     )
+    # The scoring target the solver maximizes. Passing neither flag keeps the
+    # long-standing projection-only behavior.
+    target_group = parser.add_mutually_exclusive_group()
+    target_group.add_argument(
+        "-c",
+        "--ceiling",
+        dest="ceiling",
+        action="store_true",
+        help="Optimize on ceiling instead of projection.",
+    )
+    target_group.add_argument(
+        "-pj",
+        "--projceiling",
+        dest="projceiling",
+        action="store_true",
+        help="Optimize on an equally weighted 50/50 blend of projection and ceiling.",
+    )
     args = parser.parse_args()
 
     try:
         # 1. Load and prepare data
+        target = resolve_optimization_target(args.ceiling, args.projceiling)
+        target_label = OPTIMIZATION_TARGETS[target][0]
+
         players_df = load_player_data(args.filepath)
+        print(f"Optimizing on: {target_label}.")
+        validate_target_data(players_df, target)
+
         players_dict = players_df.to_dict("index")
         player_indices = list(players_dict.keys())
         unique_game_ids = list(players_df["game_id"].unique())
@@ -439,11 +597,14 @@ def main() -> None:
         game_vars = pulp.LpVariable.dicts("Game", unique_game_ids, cat="Binary")
 
         # --- 3. Define Objective and Base Constraints (once) ---
+        # The objective is a weighted mix of projection and ceiling; the
+        # weights come from the chosen target and never change mid-run.
         prob += (
             pulp.lpSum(
-                players_dict[i]["Projection"] * player_vars[i] for i in player_indices
+                target_value(players_dict[i], target) * player_vars[i]
+                for i in player_indices
             ),
-            "Total_Projection",
+            "Total_Target_Value",
         )
 
         # Salary Cap
@@ -665,6 +826,15 @@ def main() -> None:
             print(f"\n--- Optimal NFL Lineup #{i + 1} ---")
             total_ownership = lineup_df["Ownership"].sum()
             total_ceiling = lineup_df["Ceiling"].sum()
+            # A blended run's score matches neither printed total, so show it;
+            # for the other targets the Projection/Ceiling lines already are it.
+            # The weights come from OPTIMIZATION_TARGETS, the same place the
+            # objective reads them, so a retuned blend can never print one
+            # number while the solver maximizes another.
+            if target == TARGET_BLEND:
+                _, proj_weight, ceiling_weight = OPTIMIZATION_TARGETS[target]
+                print(f"Blend Score ({target_label}): "
+                      f"{proj_weight * projection + ceiling_weight * total_ceiling:.2f}")
             print(f"Projection: {projection:.2f}")
             print(f"Ownership: {total_ownership:.2f}%")
             print(f"Ceiling: {total_ceiling:.2f}")
@@ -733,7 +903,10 @@ def main() -> None:
         if args.export and all_lineups_export_data:
             os.makedirs(EXPORT_DIR, exist_ok=True)
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            filename = f"nfl_classic_multi_lineups_{timestamp}.csv"
+            filename = (
+                f"nfl_classic_multi_lineups"
+                f"{TARGET_FILE_SUFFIXES[target]}_{timestamp}.csv"
+            )
             filepath = os.path.join(EXPORT_DIR, filename)
 
             export_df = pd.DataFrame(all_lineups_export_data)

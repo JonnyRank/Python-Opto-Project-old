@@ -29,20 +29,20 @@ All three scripts take the path to a projections CSV as the first argument.
 
 ```bash
 # Single best Classic lineup
-venv/Scripts/python.exe NFL-Single-Opto.py "C:\path\to\projections.csv" -e
+NFL-Single-Opto.py "C:\path\to\projections.csv" -e
 
 # 20 Classic lineups, at least 2 players different between any two, QB stacked with a WR/TE,
 # no DST opposite one of your own offensive players
-venv/Scripts/python.exe NFL-Multi-Opto-v2.0.py "C:\path\to\projections.csv" -n 20 -u 2 -s -ndo -e
+NFL-Multi-Opto-v2.0.py "C:\path\to\projections.csv" -n 20 -u 2 -s -ndo -e
 
 # 20 Showdown lineups with a locked Captain and a little salary left on the table
-venv/Scripts/python.exe NFL-SD-Multi-Opto-v1.0.py "C:\path\to\showdown.csv" -n 20 -u 2 -l "Drake Maye:CPT" -ms 49800 -e
+NFL-SD-Multi-Opto-v1.0.py "C:\path\to\showdown.csv" -n 20 -u 2 -l "Drake Maye:CPT" -ms 49800 -e
 
 # 20 Classic lineups built for upside instead of median points
-venv/Scripts/python.exe NFL-Multi-Opto-v2.0.py "C:\path\to\projections.csv" -n 20 -u 2 -c -e
+NFL-Multi-Opto-v2.0.py "C:\path\to\projections.csv" -n 20 -u 2 -c -e
 
 # 20 Showdown lineups on a 50/50 blend of projection and ceiling
-venv/Scripts/python.exe NFL-SD-Multi-Opto-v1.0.py "C:\path\to\showdown.csv" -n 20 -u 2 -pj -e
+NFL-SD-Multi-Opto-v1.0.py "C:\path\to\showdown.csv" -n 20 -u 2 -pj -e
 ```
 
 Lineups print to the terminal as a formatted table with total projection, ownership, ceiling,

@@ -7,8 +7,8 @@
 This project consists of Python-based optimizers for DraftKings NFL Daily Fantasy Sports (DFS). The scripts utilize the `pulp` library for linear programming to generate optimal lineups based on provided projections.
 
 Key components:
-*   **Single-Lineup Optimizer**: Generates the mathematically optimal lineup for a given slate.
-*   **Multi-Lineup Optimizer**: Generates a set of unique lineups, enforcing diversity constraints.
+*   **Multi-Lineup Optimizer** (`NFL-Multi-Opto-v2.0.py`): Generates a set of unique lineups,
+    enforcing diversity constraints. `-n 1` gives the single mathematically optimal lineup.
 *   **Showdown Multi-Lineup Optimizer** (`NFL-SD-Multi-Opto-v1.0.py`): Generates unique DraftKings
     Showdown (Captain Mode) lineups. Solved with HiGHS (via `highspy`) rather than CBC.
 

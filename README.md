@@ -153,7 +153,7 @@ literally, so a projections source that renames its columns loads without hand-e
 | `Salary` | `Salary`, `DK Salary` |
 | `Projection` | `Projection`, `Proj`, `DK Proj` |
 | `Ceiling` | `Ceiling`, `DK Ceiling` |
-| `Ownership` | `Ownership`, `Own`, `Large Field` — or `Small Field` under `-sf` |
+| `Ownership` | `Large Field`, `Ownership`, `Own` — or, under `-sf`, `Small Field` only |
 
 * Matching ignores case and punctuation, so `id` and `ID` are the same header. The first
   accepted header actually present wins, so two source columns can never collapse onto one
@@ -162,6 +162,16 @@ literally, so a projections source that renames its columns loads without hand-e
   every fuzzy resolution is printed. Near-miss decoys (`DK Value`, `DK Floor`) and the
   ownership column you did *not* ask for are excluded from that fallback, so a wrong guess
   can't quietly swap in the wrong numbers.
+* The fuzzy pass ignores alias spellings shorter than six characters. `difflib`'s ratio is
+  `2M/T` over the combined length, so an 85% cutoff gets weaker the shorter the target: against
+  `Own`, any four-letter header containing that run (`Down`, `Town`) scores `0.857` and would
+  clear it. Short names are exact-match only, which costs nothing — a header close enough to
+  `Tm` or `Opp` to be worth guessing at already hits as an exact alias.
+* Only the default (large-field) request accepts the unlabeled legacy `Own` / `Ownership`
+  headers, since on the files that carried one it was the only ownership column there was.
+  `-sf` is an explicit request for the other measure, so it takes a column that actually says
+  `Small Field` or shows `0.00%` with a note — it never falls back to an unlabeled column that
+  may hold large-field numbers.
 * A required column that stays unresolved raises an error naming it and listing the headers
   the file actually contained — the run never proceeds on a mis-mapped column.
 * `NFL-Single-Opto.py` still expects the literal legacy headers.

@@ -31,8 +31,9 @@ Input Columns:
         Salary      <- "Salary" or "DK Salary"
         Projection  <- "Projection", "Proj", or "DK Proj"
         Ceiling     <- "Ceiling" or "DK Ceiling"      (optional)
-        Ownership   <- "Ownership", "Own", or "Large Field"  (optional;
-                       -sf / --small-field reads "Small Field" instead)
+        Ownership   <- "Large Field", "Ownership", or "Own"   (optional;
+                       -sf / --small-field takes "Small Field" only, never an
+                       unlabeled legacy column that may hold the other field)
     A header matching nothing in the table falls back to fuzzy matching and is
     reported when it resolves; a required column that stays unresolved raises
     with the headers the file actually contained.
@@ -131,14 +132,22 @@ COLUMN_ALIASES: Dict[str, Tuple[str, ...]] = {
 }
 
 # The new file ships two ownership projections. -sf / --small-field chooses
-# which one becomes the "Ownership" column; the legacy "Own" header satisfies
-# either request, because an older file only ever carried one of them.
+# which one becomes the "Ownership" column.
+#
+# Only the large-field (default) request accepts the unlabeled legacy headers:
+# "Own" does not say which field it measures, and on the files that carried it
+# it was the only ownership column there was, so reading it under the default
+# preserves the historical behavior. -sf is an explicit request for the other
+# measure, so it takes a column that actually says "Small Field" or nothing at
+# all -- falling back to "Own" there would hand back large-field numbers under
+# a flag asking for small-field ones. Labeled names lead in both tuples, the
+# same new-ahead-of-legacy order the other columns use.
 OWNERSHIP_LARGE_FIELD: str = "large"
 OWNERSHIP_SMALL_FIELD: str = "small"
 
 OWNERSHIP_ALIASES: Dict[str, Tuple[str, ...]] = {
-    OWNERSHIP_LARGE_FIELD: ("Ownership", "Own", "Large Field"),
-    OWNERSHIP_SMALL_FIELD: ("Small Field", "Ownership", "Own"),
+    OWNERSHIP_LARGE_FIELD: ("Large Field", "Ownership", "Own"),
+    OWNERSHIP_SMALL_FIELD: ("Small Field",),
 }
 
 OWNERSHIP_LABELS: Dict[str, str] = {
@@ -167,6 +176,15 @@ UNMATCHABLE_HEADERS: Tuple[str, ...] = ("DK Value", "Value", "DK Floor", "Floor"
 # Minimum difflib similarity before an unrecognized header is accepted as a
 # match. Deliberately high: erroring out is better than a silent mismatch.
 FUZZY_HEADER_CUTOFF: float = 0.85
+
+# Shortest target the fuzzy pass will match against. difflib's ratio is 2M/T
+# over the combined length, so the cutoff gets weaker as the target gets
+# shorter: against "own" any four-letter header containing that run -- "Down",
+# "Town" -- scores 2*3/7 = 0.857 and clears 0.85. Six characters is where the
+# ratio starts meaning what it says. Targets below it are simply not fuzzed,
+# which costs nothing: a header close enough to "Tm" or "Opp" to be worth
+# guessing at is already an exact alias hit.
+MIN_FUZZY_TARGET_LENGTH: int = 6
 
 
 def resolve_optimization_target(use_ceiling: bool, use_blend: bool) -> str:
@@ -443,8 +461,10 @@ def resolve_columns(
     future rename the alias table has not caught yet ("DK Projection") still
     lands. The fallback is deliberately narrow: it skips headers already
     claimed, headers that are a known alias of some *other* column, and the
-    near-miss decoys in UNMATCHABLE_HEADERS, then demands FUZZY_HEADER_CUTOFF
-    similarity. Every fuzzy hit is printed, because it is a guess.
+    near-miss decoys in UNMATCHABLE_HEADERS; it ignores alias spellings shorter
+    than MIN_FUZZY_TARGET_LENGTH, against which the ratio is too weak to mean
+    anything; and it then demands FUZZY_HEADER_CUTOFF similarity. Every fuzzy
+    hit is printed, because it is a guess.
 
     Args:
         columns: The headers as read from the projections file.
@@ -490,7 +510,15 @@ def resolve_columns(
     for internal, names in aliases.items():
         if internal in resolved:
             continue
-        targets = {_normalize_header(name) for name in (internal,) + tuple(names)}
+        targets = {
+            normalized
+            for normalized in (
+                _normalize_header(name) for name in (internal,) + tuple(names)
+            )
+            if len(normalized) >= MIN_FUZZY_TARGET_LENGTH
+        }
+        if not targets:
+            continue
         best_header: Optional[Any] = None
         best_score = 0.0
         for column in columns:
@@ -630,8 +658,20 @@ def load_player_data(
         .pipe(pd.to_numeric, errors="coerce")
     )
 
-    # Projection may arrive as text ("24.8") depending on the source's quoting.
-    df["Projection"] = pd.to_numeric(df["Projection"], errors="coerce")
+    # Projection may arrive as text, and a source that reformats its headers
+    # may reformat its numbers too, so strip it like Salary and Ceiling rather
+    # than trusting float parsing. An unparseable value becomes NaN and the row
+    # is dropped below with the rest of the missing critical data.
+    df["Projection"] = (
+        df["Projection"]
+        .astype(str)
+        .str.replace(r"[\$,%\s]", "", regex=True)
+        .pipe(pd.to_numeric, errors="coerce")
+    )
+
+    # ID is coerced for the same reason: a non-integral id would otherwise
+    # reach .astype(int) below and raise without naming the column or the row.
+    df["ID"] = pd.to_numeric(df["ID"], errors="coerce")
 
     # Drop players with missing critical data for optimization
     critical_cols = ["ID", "Salary", "Projection", "Position"]

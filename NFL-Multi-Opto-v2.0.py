@@ -563,14 +563,32 @@ def load_player_data(
             "  Add the column to the file, or add its header to COLUMN_ALIASES."
         )
 
-    df.rename(
-        columns={
-            header: internal
-            for internal, header in resolved.items()
-            if header != internal
-        },
-        inplace=True,
-    )
+    rename_map = {
+        header: internal
+        for internal, header in resolved.items()
+        if header != internal
+    }
+
+    # A header the resolver did not pick can still collide with a rename
+    # target, which would leave two columns sharing one name and break every
+    # df["<name>"] downstream. The live case is -sf against a file carrying
+    # both "Small Field" and a literal "Ownership": the small-field request
+    # wins, so the unchosen "Ownership" column is dropped rather than allowed
+    # to silently supply ownership the flag explicitly did not ask for.
+    chosen = set(resolved.values())
+    targets = set(rename_map.values())
+    superseded = [
+        column for column in df.columns if column in targets and column not in chosen
+    ]
+    if superseded:
+        for column in superseded:
+            print(
+                f"  NOTE: Ignoring the file's own '{column}' column; "
+                f"'{resolved[column]}' supplies it instead."
+            )
+        df.drop(columns=superseded, inplace=True)
+
+    df.rename(columns=rename_map, inplace=True)
     for internal, header in sorted(resolved.items()):
         if header != internal:
             print(f"  Mapped column '{header}' -> '{internal}'.")

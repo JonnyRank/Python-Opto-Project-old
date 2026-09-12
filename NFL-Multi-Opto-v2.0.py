@@ -26,8 +26,11 @@ Optimization Targets:
 Input Columns:
     Headers are resolved through COLUMN_ALIASES, so both the legacy and the
     current projections headers load without editing the CSV:
-        ID          <- "ID" or "id"
+        ID          <- "ID", "id", "DK ID", or "Player ID"
+        Player      <- "Player", "Name", or "Player Name"
         Position    <- "Position", "DK Pos", or "Pos"
+        Team        <- "Team" or "Tm"
+        Opp         <- "Opp" or "Opponent"
         Salary      <- "Salary" or "DK Salary"
         Projection  <- "Projection", "Proj", or "DK Proj"
         Ceiling     <- "Ceiling" or "DK Ceiling"      (optional)

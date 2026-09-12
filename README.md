@@ -7,7 +7,6 @@ and maximizes total projected points subject to the salary cap and DraftKings ro
 | Script | Format | Roster | Lineups | Solver |
 | --- | --- | --- | --- | --- |
 | `NFL-Multi-Opto-v2.0.py` | Classic | QB, 2 RB, 3 WR, TE, FLEX, DST (9) | Many | CBC |
-| `NFL-Single-Opto.py` | Classic | QB, 2 RB, 3 WR, TE, FLEX, DST (9) | One | CBC |
 | `NFL-SD-Multi-Opto-v1.0.py` | Showdown (Captain Mode) | 1 CPT + 5 FLEX (6) | Many | HiGHS |
 
 (The repo also contains two older NBA scripts. They are configured by editing constants at
@@ -25,11 +24,11 @@ Classic optimizers use the CBC solver that ships with PuLP.
 
 ## Running
 
-All three scripts take the path to a projections CSV as the first argument.
+Both scripts take the path to a projections CSV as the first argument.
 
 ```bash
 # Single best Classic lineup
-python NFL-Single-Opto.py "C:\path\to\projections.csv" -e
+python NFL-Multi-Opto-v2.0.py "C:\path\to\projections.csv" -n 1 -e
 
 # 20 Classic lineups, at least 2 players different between any two, QB stacked with a WR/TE,
 # no DST opposite one of your own offensive players
@@ -66,14 +65,10 @@ and salary. Nothing is written to disk unless you pass `-e`.
 | `-ndo`, `--no-dst-opp` | Never roster a DST alongside a QB/RB/WR/TE from the opposing team |
 | `-c`, `--ceiling` | Optimize on ceiling instead of projection |
 | `-pj`, `--projceiling` | Optimize on a 50/50 blend of projection and ceiling |
+| `-sf`, `--small-field` | Show small-field ownership instead of large-field (display/export only) |
 
 Name matching for `-l` and `-x` is case-insensitive. A name that isn't in the projections file
 prints a warning and is skipped rather than failing the run.
-
-### `NFL-Single-Opto.py` (Classic, one lineup)
-
-Takes only `filepath` and `-e`, `--export`. It applies the same salary cap, roster, and
-two-games constraints as the multi-lineup version, without locks, stacking, or exclusions.
 
 ### `NFL-SD-Multi-Opto-v1.0.py` (Showdown, multi-lineup)
 
@@ -135,10 +130,45 @@ stacks, diversity) is unchanged.
 
 ### Classic
 
-Expected columns: `ID`, `Player`, `Position`, `Team`, `Opp`, `Salary`, `Proj`, `Own`, plus the
-optional `Ceiling` (required only for `--ceiling` / `--projceiling`).
+Required columns: `ID`, `Player`, `Position`, `Team`, `Opp`, `Salary`, `Proj`. `Own` and
+`Ceiling` are optional and default to `0.00` (`Ceiling` is required only for `--ceiling` /
+`--projceiling`).
 
-* `Salary` may be formatted (`$6,000`) and `Own` may carry a `%` — both are cleaned on load.
+`NFL-Multi-Opto-v2.0.py` resolves headers through an alias table instead of taking them
+literally, so a projections source that renames its columns loads without hand-editing the CSV:
+
+| Internal column | Accepted headers |
+| --- | --- |
+| `ID` | `ID`, `id`, `DK ID`, `Player ID` |
+| `Player` | `Player`, `Name`, `Player Name` |
+| `Position` | `Position`, `DK Pos`, `Pos` |
+| `Team` | `Team`, `Tm` |
+| `Opp` | `Opp`, `Opponent` |
+| `Salary` | `Salary`, `DK Salary` |
+| `Projection` | `Projection`, `Proj`, `DK Proj` |
+| `Ceiling` | `Ceiling`, `DK Ceiling` |
+| `Ownership` | `Large Field`, `Ownership`, `Own` — or, under `-sf`, `Small Field` only |
+
+* Matching ignores case and punctuation, so `id` and `ID` are the same header. The first
+  accepted header actually present wins, so two source columns can never collapse onto one
+  internal name.
+* A header matching nothing in the table falls back to fuzzy matching (85% similarity), and
+  every fuzzy resolution is printed. Near-miss decoys (`DK Value`, `DK Floor`) and the
+  ownership column you did *not* ask for are excluded from that fallback, so a wrong guess
+  can't quietly swap in the wrong numbers.
+* The fuzzy pass ignores alias spellings shorter than six characters. `difflib`'s ratio is
+  `2M/T` over the combined length, so an 85% cutoff gets weaker the shorter the target: against
+  `Own`, any four-letter header containing that run (`Down`, `Town`) scores `0.857` and would
+  clear it. Short names are exact-match only, which costs nothing — a header close enough to
+  `Tm` or `Opp` to be worth guessing at already hits as an exact alias.
+* Only the default (large-field) request accepts the unlabeled legacy `Own` / `Ownership`
+  headers, since on the files that carried one it was the only ownership column there was.
+  `-sf` is an explicit request for the other measure, so it takes a column that actually says
+  `Small Field` or shows `0.00%` with a note — it never falls back to an unlabeled column that
+  may hold large-field numbers.
+* A required column that stays unresolved raises an error naming it and listing the headers
+  the file actually contained — the run never proceeds on a mis-mapped column.
+* `Salary` may be formatted (`$6,000`) and ownership may carry a `%` — both are cleaned on load.
 * `Opp` may be written `@BUF` or `BUF`; the `@` is stripped when pairing teams into games.
 * Rows missing `ID`, `Salary`, `Proj`, or `Position` are dropped before optimizing.
 * Every lineup is required to use players from at least two different games.

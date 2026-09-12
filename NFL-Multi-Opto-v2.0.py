@@ -513,11 +513,17 @@ def resolve_columns(
     for internal, names in aliases.items():
         if internal in resolved:
             continue
+        # Targets are the alias list alone, never the internal name as well.
+        # For every column but ownership the internal name *is* the first
+        # alias, so this changes nothing; for ownership it is the point.
+        # Adding "Ownership" unconditionally would let an unlabeled header
+        # like "OwnershipPct" fuzzy-match under -sf (2*9/21 = 0.857), which
+        # is exactly the substitution -sf promises never to make. Built this
+        # way, the fuzzy pass honors the same labeled/unlabeled rule the
+        # exact pass does.
         targets = {
             normalized
-            for normalized in (
-                _normalize_header(name) for name in (internal,) + tuple(names)
-            )
+            for normalized in (_normalize_header(name) for name in names)
             if len(normalized) >= MIN_FUZZY_TARGET_LENGTH
         }
         if not targets:

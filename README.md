@@ -175,7 +175,6 @@ literally, so a projections source that renames its columns loads without hand-e
 * A required column that stays unresolved raises an error naming it and listing the headers
   the file actually contained — the run never proceeds on a mis-mapped column.
 * `NFL-Single-Opto.py` still expects the literal legacy headers.
-
 * `Salary` may be formatted (`$6,000`) and ownership may carry a `%` — both are cleaned on load.
 * `Opp` may be written `@BUF` or `BUF`; the `@` is stripped when pairing teams into games.
 * Rows missing `ID`, `Salary`, `Proj`, or `Position` are dropped before optimizing.

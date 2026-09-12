@@ -10,8 +10,8 @@ The script is run from the command line, specifying the path to the
 projections CSV file as an argument.
 
 Input Arguments:
-    python NFL-Multi-Opto-v2.0.py "path" -n -u -e -te -x -l -s -srb -ndo -c -pj
-    python <script> <proj file> <# of lineups> <min uniques> <max TE> <exclude> <export to CSV> <lock players> <stack QB with WR/TE> <stack QB with RB> <no DST vs Opp> <optimize on ceiling> <optimize on 50/50 proj+ceiling>
+    python NFL-Multi-Opto-v2.0.py "path" -n -u -e -te -x -l -s -srb -ndo -c -pj -sf
+    python <script> <proj file> <# of lineups> <min uniques> <max TE> <exclude> <export to CSV> <lock players> <stack QB with WR/TE> <stack QB with RB> <no DST vs Opp> <optimize on ceiling> <optimize on 50/50 proj+ceiling> <use small-field ownership>
     python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -e -l "Josh Allen" -s -ndo
     python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -c
     python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -pj
@@ -23,8 +23,23 @@ Optimization Targets:
     The two flags are mutually exclusive; omitting both keeps the historical
     projection-only behavior.
 
+Input Columns:
+    Headers are resolved through COLUMN_ALIASES, so both the legacy and the
+    current projections headers load without editing the CSV:
+        ID          <- "ID" or "id"
+        Position    <- "Position", "DK Pos", or "Pos"
+        Salary      <- "Salary" or "DK Salary"
+        Projection  <- "Projection", "Proj", or "DK Proj"
+        Ceiling     <- "Ceiling" or "DK Ceiling"      (optional)
+        Ownership   <- "Ownership", "Own", or "Large Field"  (optional;
+                       -sf / --small-field reads "Small Field" instead)
+    A header matching nothing in the table falls back to fuzzy matching and is
+    reported when it resolves; a required column that stays unresolved raises
+    with the headers the file actually contained.
+
 Key Features:
 - Loads player data from a command-line specified CSV file.
+- Accepts either the legacy or the current projections headers.
 - Cleans and validates player salary, projection, and ownership data.
 - Identifies unique games to enforce the "at least two games" rule.
 - Uses the PuLP library to model and solve the optimization problem.
@@ -37,9 +52,10 @@ Key Features:
 import os
 import re
 import csv
+import difflib
 import argparse
 from datetime import datetime
-from typing import Any, Dict, FrozenSet, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 
 import pandas as pd
 import pulp
@@ -96,6 +112,61 @@ EXPORT_COLUMNS: List[str] = [
     "Ceiling",
 ]
 # John Rankin's (Dad) Downloads folder path: r"C:\Users\jdr0824\Downloads" r"C:\Users\jdr0824\Downloads"
+
+# --- Projections CSV headers ---
+# Internal column name -> the source headers that may carry it, in preference
+# order. The projections source renamed several columns ("DK Pos", "DK Salary",
+# "DK Proj", "DK Ceiling", "id"), so both generations of header are accepted.
+# The first alias actually present wins, which keeps two source columns from
+# ever collapsing onto one internal name.
+COLUMN_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "ID": ("ID", "id", "DK ID", "Player ID"),
+    "Player": ("Player", "Name", "Player Name"),
+    "Position": ("Position", "DK Pos", "Pos"),
+    "Team": ("Team", "Tm"),
+    "Opp": ("Opp", "Opponent"),
+    "Salary": ("Salary", "DK Salary"),
+    "Projection": ("Projection", "Proj", "DK Proj"),
+    "Ceiling": ("Ceiling", "DK Ceiling"),
+}
+
+# The new file ships two ownership projections. -sf / --small-field chooses
+# which one becomes the "Ownership" column; the legacy "Own" header satisfies
+# either request, because an older file only ever carried one of them.
+OWNERSHIP_LARGE_FIELD: str = "large"
+OWNERSHIP_SMALL_FIELD: str = "small"
+
+OWNERSHIP_ALIASES: Dict[str, Tuple[str, ...]] = {
+    OWNERSHIP_LARGE_FIELD: ("Ownership", "Own", "Large Field"),
+    OWNERSHIP_SMALL_FIELD: ("Small Field", "Ownership", "Own"),
+}
+
+OWNERSHIP_LABELS: Dict[str, str] = {
+    OWNERSHIP_LARGE_FIELD: "large field",
+    OWNERSHIP_SMALL_FIELD: "small field",
+}
+
+# Columns the optimizer cannot run without. "Ownership" and "Ceiling" stay
+# optional and default to 0.00 when the file has neither name for them.
+REQUIRED_COLUMNS: Tuple[str, ...] = (
+    "ID",
+    "Player",
+    "Position",
+    "Team",
+    "Opp",
+    "Salary",
+    "Projection",
+)
+
+# Headers the fuzzy fallback must never claim. These are real columns with
+# meanings of their own that sit one word away from a column we do want --
+# "DK Proj" vs "DK Floor" vs "DK Ceiling" vs "DK Value" -- and a wrong guess
+# among them would silently optimize on the wrong numbers.
+UNMATCHABLE_HEADERS: Tuple[str, ...] = ("DK Value", "Value", "DK Floor", "Floor")
+
+# Minimum difflib similarity before an unrecognized header is accepted as a
+# match. Deliberately high: erroring out is better than a silent mismatch.
+FUZZY_HEADER_CUTOFF: float = 0.85
 
 
 def resolve_optimization_target(use_ceiling: bool, use_blend: bool) -> str:
@@ -348,12 +419,116 @@ def _dk_roster_position(slot: Any) -> str:
     return re.sub(r"\d+$", "", str(slot)).upper()
 
 
-def load_player_data(filepath: str) -> pd.DataFrame:
+def _normalize_header(header: Any) -> str:
+    """Reduces a CSV header to a comparable token: lowercase, alphanumerics only."""
+    return re.sub(r"[^a-z0-9]", "", str(header).lower())
+
+
+def _alias_table(ownership_field: str) -> Dict[str, Tuple[str, ...]]:
+    """Returns the full alias table with the requested ownership column folded in."""
+    aliases = dict(COLUMN_ALIASES)
+    aliases["Ownership"] = OWNERSHIP_ALIASES[ownership_field]
+    return aliases
+
+
+def resolve_columns(
+    columns: List[Any], ownership_field: str = OWNERSHIP_LARGE_FIELD
+) -> Tuple[Dict[str, Any], List[str]]:
+    """
+    Maps each internal column name onto a header actually present in the file.
+
+    Two passes. The first takes exact alias hits, compared case- and
+    punctuation-insensitively so "id", "ID", and "DK ID" are one header. The
+    second is a difflib fuzzy fallback for anything still unresolved, so a
+    future rename the alias table has not caught yet ("DK Projection") still
+    lands. The fallback is deliberately narrow: it skips headers already
+    claimed, headers that are a known alias of some *other* column, and the
+    near-miss decoys in UNMATCHABLE_HEADERS, then demands FUZZY_HEADER_CUTOFF
+    similarity. Every fuzzy hit is printed, because it is a guess.
+
+    Args:
+        columns: The headers as read from the projections file.
+        ownership_field: OWNERSHIP_LARGE_FIELD or OWNERSHIP_SMALL_FIELD.
+
+    Returns:
+        A (resolved, unresolved) pair: `resolved` maps internal column name to
+        the source header supplying it; `unresolved` lists internal names with
+        no header at all.
+    """
+    aliases = _alias_table(ownership_field)
+
+    # First header wins a normalized spelling, so a file carrying both "Own"
+    # and "own" does not produce a duplicate-column rename.
+    by_normalized: Dict[str, Any] = {}
+    for column in columns:
+        by_normalized.setdefault(_normalize_header(column), column)
+
+    resolved: Dict[str, Any] = {}
+    claimed: Set[str] = set()
+
+    # Pass 1: exact alias hits, in the table's preference order.
+    for internal, names in aliases.items():
+        for name in names:
+            header = by_normalized.get(_normalize_header(name))
+            if header is None or _normalize_header(header) in claimed:
+                continue
+            resolved[internal] = header
+            claimed.add(_normalize_header(header))
+            break
+
+    # Pass 2: fuzzy fallback. Reserve every alias of every column (both
+    # ownership variants, so --small-field never silently eats "Large Field")
+    # plus the decoy headers.
+    reserved: Set[str] = {
+        _normalize_header(name)
+        for table in (COLUMN_ALIASES, OWNERSHIP_ALIASES)
+        for names in table.values()
+        for name in names
+    }
+    reserved.update(_normalize_header(name) for name in UNMATCHABLE_HEADERS)
+
+    for internal, names in aliases.items():
+        if internal in resolved:
+            continue
+        targets = {_normalize_header(name) for name in (internal,) + tuple(names)}
+        best_header: Optional[Any] = None
+        best_score = 0.0
+        for column in columns:
+            normalized = _normalize_header(column)
+            if normalized in claimed or normalized in reserved:
+                continue
+            score = max(
+                difflib.SequenceMatcher(None, normalized, target).ratio()
+                for target in targets
+            )
+            if score > best_score:
+                best_header, best_score = column, score
+        if best_header is not None and best_score >= FUZZY_HEADER_CUTOFF:
+            resolved[internal] = best_header
+            claimed.add(_normalize_header(best_header))
+            print(
+                f"  NOTE: Unrecognized header '{best_header}' matched to "
+                f"'{internal}' (similarity {best_score:.2f})."
+            )
+
+    unresolved = [internal for internal in aliases if internal not in resolved]
+    return resolved, unresolved
+
+
+def load_player_data(
+    filepath: str, ownership_field: str = OWNERSHIP_LARGE_FIELD
+) -> pd.DataFrame:
     """
     Loads and preprocesses player data from the projections CSV file.
 
+    Headers are resolved through COLUMN_ALIASES rather than taken literally, so
+    both the legacy names ("Proj", "Own", "ID") and the current ones
+    ("DK Proj", "Large Field", "id") load without editing the file by hand.
+
     Args:
         filepath: The absolute path to the projections CSV file.
+        ownership_field: Which ownership projection becomes the "Ownership"
+            column -- OWNERSHIP_LARGE_FIELD (default) or OWNERSHIP_SMALL_FIELD.
 
     Returns:
         A pandas DataFrame containing cleaned and prepared player data ready
@@ -374,8 +549,31 @@ def load_player_data(filepath: str) -> pd.DataFrame:
     print(f"Successfully loaded {len(df)} players from {os.path.basename(filepath)}.")
 
     # --- Data Cleaning and Preparation ---
-    # Rename columns for consistency
-    df.rename(columns={"Proj": "Projection", "Own": "Ownership"}, inplace=True)
+    # Map whatever headers this file carries onto the internal names the rest
+    # of the script uses, then rename in one pass.
+    source_headers = list(df.columns)
+    resolved, unresolved = resolve_columns(source_headers, ownership_field)
+
+    missing_required = [name for name in REQUIRED_COLUMNS if name in unresolved]
+    if missing_required:
+        raise ValueError(
+            "Projections file is missing required column(s): "
+            f"{', '.join(missing_required)}.\n"
+            f"  Headers found: {', '.join(str(h) for h in source_headers)}\n"
+            "  Add the column to the file, or add its header to COLUMN_ALIASES."
+        )
+
+    df.rename(
+        columns={
+            header: internal
+            for internal, header in resolved.items()
+            if header != internal
+        },
+        inplace=True,
+    )
+    for internal, header in sorted(resolved.items()):
+        if header != internal:
+            print(f"  Mapped column '{header}' -> '{internal}'.")
 
     # Clean Salary column (e.g., "$6,000 " -> 6000)
     df["Salary"] = (
@@ -385,6 +583,14 @@ def load_player_data(filepath: str) -> pd.DataFrame:
         .pipe(pd.to_numeric, errors="coerce")
     )
 
+    # Ownership is display-and-export only -- no constraint or objective reads
+    # it -- so a file without either ownership column still optimizes.
+    if "Ownership" not in df.columns:
+        print(
+            f"  NOTE: No {OWNERSHIP_LABELS[ownership_field]} ownership column found. "
+            f"Ownership will display as 0.00%."
+        )
+        df["Ownership"] = 0.0
     # Clean Ownership column (e.g., "11.70%" -> 11.70)
     df["Ownership"] = (
         df["Ownership"]
@@ -405,6 +611,9 @@ def load_player_data(filepath: str) -> pd.DataFrame:
         .str.replace(r"[\$,%\s]", "", regex=True)
         .pipe(pd.to_numeric, errors="coerce")
     )
+
+    # Projection may arrive as text ("24.8") depending on the source's quoting.
+    df["Projection"] = pd.to_numeric(df["Projection"], errors="coerce")
 
     # Drop players with missing critical data for optimization
     critical_cols = ["ID", "Salary", "Projection", "Position"]
@@ -559,6 +768,15 @@ def main() -> None:
         type=int,
         help="Maximum number of TEs allowed in a lineup (e.g., 1 to ban TE in FLEX).",
     )
+    parser.add_argument(
+        "-sf",
+        "--small-field",
+        action="store_true",
+        help=(
+            "Display small-field ownership instead of large-field ownership "
+            "(display/export only; ownership is not optimized on)."
+        ),
+    )
     # The scoring target the solver maximizes. Passing neither flag keeps the
     # long-standing projection-only behavior.
     target_group = parser.add_mutually_exclusive_group()
@@ -583,7 +801,10 @@ def main() -> None:
         target = resolve_optimization_target(args.ceiling, args.projceiling)
         target_label = OPTIMIZATION_TARGETS[target][0]
 
-        players_df = load_player_data(args.filepath)
+        ownership_field = (
+            OWNERSHIP_SMALL_FIELD if args.small_field else OWNERSHIP_LARGE_FIELD
+        )
+        players_df = load_player_data(args.filepath, ownership_field)
         print(f"Optimizing on: {target_label}.")
         validate_target_data(players_df, target)
 

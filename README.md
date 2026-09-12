@@ -66,6 +66,7 @@ and salary. Nothing is written to disk unless you pass `-e`.
 | `-ndo`, `--no-dst-opp` | Never roster a DST alongside a QB/RB/WR/TE from the opposing team |
 | `-c`, `--ceiling` | Optimize on ceiling instead of projection |
 | `-pj`, `--projceiling` | Optimize on a 50/50 blend of projection and ceiling |
+| `-sf`, `--small-field` | Show small-field ownership instead of large-field (display/export only) |
 
 Name matching for `-l` and `-x` is case-insensitive. A name that isn't in the projections file
 prints a warning and is skipped rather than failing the run.
@@ -135,10 +136,37 @@ stacks, diversity) is unchanged.
 
 ### Classic
 
-Expected columns: `ID`, `Player`, `Position`, `Team`, `Opp`, `Salary`, `Proj`, `Own`, plus the
-optional `Ceiling` (required only for `--ceiling` / `--projceiling`).
+Required columns: `ID`, `Player`, `Position`, `Team`, `Opp`, `Salary`, `Proj`. `Own` and
+`Ceiling` are optional and default to `0.00` (`Ceiling` is required only for `--ceiling` /
+`--projceiling`).
 
-* `Salary` may be formatted (`$6,000`) and `Own` may carry a `%` — both are cleaned on load.
+`NFL-Multi-Opto-v2.0.py` resolves headers through an alias table instead of taking them
+literally, so a projections source that renames its columns loads without hand-editing the CSV:
+
+| Internal column | Accepted headers |
+| --- | --- |
+| `ID` | `ID`, `id`, `DK ID`, `Player ID` |
+| `Player` | `Player`, `Name`, `Player Name` |
+| `Position` | `Position`, `DK Pos`, `Pos` |
+| `Team` | `Team`, `Tm` |
+| `Opp` | `Opp`, `Opponent` |
+| `Salary` | `Salary`, `DK Salary` |
+| `Projection` | `Projection`, `Proj`, `DK Proj` |
+| `Ceiling` | `Ceiling`, `DK Ceiling` |
+| `Ownership` | `Ownership`, `Own`, `Large Field` — or `Small Field` under `-sf` |
+
+* Matching ignores case and punctuation, so `id` and `ID` are the same header. The first
+  accepted header actually present wins, so two source columns can never collapse onto one
+  internal name.
+* A header matching nothing in the table falls back to fuzzy matching (85% similarity), and
+  every fuzzy resolution is printed. Near-miss decoys (`DK Value`, `DK Floor`) and the
+  ownership column you did *not* ask for are excluded from that fallback, so a wrong guess
+  can't quietly swap in the wrong numbers.
+* A required column that stays unresolved raises an error naming it and listing the headers
+  the file actually contained — the run never proceeds on a mis-mapped column.
+* `NFL-Single-Opto.py` still expects the literal legacy headers.
+
+* `Salary` may be formatted (`$6,000`) and ownership may carry a `%` — both are cleaned on load.
 * `Opp` may be written `@BUF` or `BUF`; the `@` is stripped when pairing teams into games.
 * Rows missing `ID`, `Salary`, `Proj`, or `Position` are dropped before optimizing.
 * Every lineup is required to use players from at least two different games.

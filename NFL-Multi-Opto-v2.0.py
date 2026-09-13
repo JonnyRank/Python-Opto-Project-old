@@ -857,7 +857,8 @@ def find_dk_entries_file(directory: Optional[str] = None) -> str:
         FileNotFoundError: If the folder holds no entries file.
     """
     directory = directory or DOWNLOADS_DIR
-    matches = glob.glob(os.path.join(directory, DK_ENTRIES_GLOB))
+    # Escape the folder so a "[" in a Windows username is not read as a pattern.
+    matches = glob.glob(os.path.join(glob.escape(directory), DK_ENTRIES_GLOB))
     if not matches:
         raise FileNotFoundError(
             f"No {DK_ENTRIES_GLOB} file found in {directory}. Download your "

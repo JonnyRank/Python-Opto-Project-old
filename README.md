@@ -252,8 +252,8 @@ python NFL-Multi-Opto-v2.0.py "C:\path\to\projections.csv" -ls -u 2
   in a lineup are fair game: the optimizer may keep them, move them to another slot, or
   replace them. Players are matched to your projections by DraftKings ID, so a player with no
   projection can't be swapped in.
-* **FLEX** — among the new picks, the latest kickoff goes in FLEX, which keeps the most
-  options open if you late-swap again later.
+* **FLEX** — of the new picks eligible to sit in FLEX, the one with the latest kickoff goes
+  there, which keeps the most options open if you late-swap again later.
 * **`-u`** — enforced between entries in the same contest only; entries in different contests
   may end up identical. When locked players alone already make two entries overlap more than
   `-u` allows, the new picks must all differ. If an entry can't meet `-u` at all, it is built

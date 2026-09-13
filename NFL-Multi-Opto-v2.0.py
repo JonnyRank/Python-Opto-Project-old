@@ -937,9 +937,13 @@ def load_dk_entries_file(
             f"with {ROSTER_SIZE}."
         )
 
+    # Entry rows run on past the pool header -- the two blocks share rows --
+    # so the whole file is scanned, and a row counts as an entry only when it
+    # opens with a numeric Entry ID. A pool row never does, even if a future
+    # export shifted the pool block into column 0.
     entries: List[DkEntry] = []
     for cells in rows[1:]:
-        if not cells or not cells[0].strip():
+        if not cells or not cells[0].strip().isdigit():
             continue
         padded = cells[:width] + [""] * (width - len(cells))
         entries.append(
@@ -966,7 +970,11 @@ def load_dk_entries_file(
         raise ValueError(f"{filename}'s player pool is missing column(s): {', '.join(missing)}.")
     col = {name: pool_header.index(name) for name in needed}
 
-    zone = now.tzinfo or _game_info_timezone()
+    # Game Info times are Eastern whatever zone `now` arrives in; a naive
+    # `now` is taken as Eastern too.
+    zone = _game_info_timezone()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=zone)
     pool: Dict[int, DkPoolPlayer] = {}
     for cells in rows[header_idx + 1 :]:
         if len(cells) <= max(col.values()):
@@ -1085,12 +1093,17 @@ def optimize_late_swap_entry(
     open_counts = Counter(label for label in open_labels if label != FLEX_SLOT)
     open_flex = len(open_labels) - sum(open_counts.values())
     flex_positions = {p.primary_slot for p in pool.values() if p.flex_eligible}
+    locked_set = set(locked_ids)
 
-    # Only players who fit one of the open slots get a variable.
+    # Only players who fit one of the open slots get a variable. A player
+    # already fixed in a locked slot never does -- DraftKings' LOCKED tag can
+    # lock a player whose kickoff the clock still calls future, and picking
+    # him again would roster him twice.
     fits = {
         dk_id: player
         for dk_id, player in candidates.items()
-        if player.primary_slot in open_counts or (open_flex and player.flex_eligible)
+        if dk_id not in locked_set
+        and (player.primary_slot in open_counts or (open_flex and player.flex_eligible))
     }
 
     def members(predicate) -> List[int]:
@@ -1148,8 +1161,11 @@ def optimize_late_swap_entry(
         locked_te = sum(1 for p in locked_players if p.primary_slot == "TE")
         tes = members(lambda p: p.primary_slot == "TE")
         if tes:
+            # An open TE slot must be filled whatever the cap says -- a locked
+            # FLEX TE under -te 1 would otherwise make the entry infeasible.
+            te_allowance = max(args.max_te - locked_te, open_counts.get("TE", 0))
             prob += (
-                pulp.lpSum(pick[i] for i in tes) <= max(args.max_te - locked_te, 0),
+                pulp.lpSum(pick[i] for i in tes) <= te_allowance,
                 "Max_TE_Constraint",
             )
 
@@ -1180,7 +1196,6 @@ def optimize_late_swap_entry(
     # -u against the lineups already built for this contest. Locked overlap is
     # fixed, so where it alone exceeds the allowance the best achievable is no
     # further overlap among the new picks.
-    locked_set = set(locked_ids)
     for prev in previous:
         shared = [i for i in fits if i in prev]
         if shared:
@@ -1200,10 +1215,11 @@ def _seat_open_slots(
     Seats the solver's picks in an entry's open slots.
 
     The model chooses players by position count, so seating is post-hoc, as
-    in the full optimizer. Within a position, earlier kickoffs take the
-    positional slots and the surplus goes to FLEX, so FLEX holds the latest
-    game on the lineup: a FLEX player can be swapped for any RB/WR/TE on a
-    later late-swap run, which keeps the most options open.
+    in the full optimizer. The picks' position counts fix which position
+    supplies the FLEX; within that position, earlier kickoffs take the
+    positional slots and the latest kickoff goes to FLEX. A FLEX player can
+    be swapped for any RB/WR/TE on a later late-swap run, so this keeps the
+    most options open that the picks allow.
 
     Returns:
         Slot index -> player, or None if the picks cannot fill the slots.
@@ -1417,27 +1433,35 @@ def run_late_swap(
         else:
             open_labels = [slot_labels[idx] for idx in open_slots]
             previous = history[entry.contest_id]
+            seated: Optional[Dict[int, DkPoolPlayer]] = None
 
-            def solve(prev: List[FrozenSet[int]]) -> Optional[Dict[int, DkPoolPlayer]]:
+            # First with -u against this contest's earlier entries, then,
+            # if that is infeasible, without it.
+            for relaxed, prev in enumerate([previous, []] if previous else [[]]):
                 picks = optimize_late_swap_entry(
                     open_labels, locked_ids, pool, candidates, projections,
                     target, args, lock_ids, prev,
                 )
                 if picks is None:
-                    return None
-                return _seat_open_slots(open_slots, slot_labels, [pool[i] for i in picks])
-
-            seated = solve(previous)
-            if seated is None and previous:
-                seated = solve([])
-                if seated is not None:
+                    continue
+                seated = _seat_open_slots(open_slots, slot_labels, [pool[i] for i in picks])
+                if seated is None:
+                    # The count identities guarantee a seating, so this means
+                    # the model and the seater disagree -- not infeasibility.
+                    note = (
+                        "the optimizer found a lineup the seating step could not "
+                        "place (a bug); entry left unchanged."
+                    )
+                elif relaxed:
                     note = (
                         f"could not differ by {args.min_uniques} from every earlier "
                         f"entry in this contest; built without that rule."
                     )
+                break
+
             if seated is None:
                 failed += 1
-                note = (
+                note = note or (
                     "no swap fits the salary cap and your rules "
                     "(-l/-x/-s/-srb/-te/-ndo); entry left unchanged."
                 )

@@ -10,11 +10,23 @@ The script is run from the command line, specifying the path to the
 projections CSV file as an argument.
 
 Input Arguments:
-    python NFL-Multi-Opto-v2.0.py "path" -n -u -e -te -x -l -s -srb -ndo -c -pj -sf
-    python <script> <proj file> <# of lineups> <min uniques> <max TE> <exclude> <export to CSV> <lock players> <stack QB with WR/TE> <stack QB with RB> <no DST vs Opp> <optimize on ceiling> <optimize on 50/50 proj+ceiling> <use small-field ownership>
+    python NFL-Multi-Opto-v2.0.py "path" -n -u -e -te -x -l -s -srb -ndo -c -pj -sf -ls
+    python <script> <proj file> <# of lineups> <min uniques> <max TE> <exclude> <export to CSV> <lock players> <stack QB with WR/TE> <stack QB with RB> <no DST vs Opp> <optimize on ceiling> <optimize on 50/50 proj+ceiling> <use small-field ownership> <late swap DKEntries.csv>
     python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -e -l "Josh Allen" -s -ndo
     python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -c
     python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -pj
+    python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -ls -u 2
+
+Late Swap (-ls / --late-swap):
+    Reads the newest DKEntries*.csv in your Downloads folder and re-optimizes
+    every entry in it. A player whose game has started -- judged from Game
+    Info against the clock at runtime, or DraftKings' own LOCKED tag -- stays
+    in his slot. Every other slot, including unstarted players already in the
+    lineup, is refilled from players whose games have not started. -u is
+    enforced between entries of the same contest only. All entries are written
+    to Downloads\\upload-ready-DKEntries-<timestamp>.csv, each cell holding
+    DraftKings' own "Name + ID" text. -l, -x, -s, -srb, -te, -ndo, -c, -pj and
+    -sf apply; -n and -e do not.
 
 Optimization Targets:
     (default)               Maximize total projection.
@@ -56,10 +68,14 @@ Key Features:
 import os
 import re
 import csv
+import glob
 import difflib
 import argparse
-from datetime import datetime
+from collections import Counter, defaultdict
+from dataclasses import dataclass
+from datetime import datetime, tzinfo
 from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pandas as pd
 import pulp
@@ -116,6 +132,31 @@ EXPORT_COLUMNS: List[str] = [
     "Ceiling",
 ]
 # John Rankin's (Dad) Downloads folder path: r"C:\Users\jdr0824\Downloads" r"C:\Users\jdr0824\Downloads"
+
+# --- Late Swap ---
+# -ls / --late-swap re-optimizes the entries in a DraftKings entries file
+# mid-slate. The file is found in the current user's Downloads folder and the
+# finished lineups go back there in DraftKings' own upload layout.
+DOWNLOADS_DIR: str = os.path.join(os.path.expanduser("~"), "Downloads")
+# The newest match wins, so a browser re-download ("DKEntries (1).csv") is
+# picked up. Files that merely contain the name ("SD-DKEntries.csv",
+# "upload-ready-DKEntries-...") do not match.
+DK_ENTRIES_GLOB: str = "DKEntries*.csv"
+UPLOAD_FILE_PREFIX: str = "upload-ready-DKEntries"
+# Game Info reads "GB@MIN 09/13/2026 04:25PM ET" before kickoff and
+# "In Progress" after it. Kickoffs are Eastern wherever the script runs, so the
+# clock comparison is made in that zone.
+GAME_INFO_TIMEZONE: str = "America/New_York"
+KICKOFF_PATTERN = re.compile(r"(\d{1,2}/\d{1,2}/\d{4} \d{1,2}:\d{2}[AP]M) ET")
+KICKOFF_FORMAT: str = "%m/%d/%Y %I:%M%p"
+# DraftKings tags a rostered player whose game has started. The clock decides
+# on its own, but the tag is honored too: DraftKings rejects any change to a
+# player it has already locked, whatever the local clock says.
+DK_LOCKED_TAG: str = "(LOCKED)"
+DK_ID_PATTERN = re.compile(r"\((\d+)\)")
+# Entry ID, Contest Name, Contest ID, and Entry Fee precede the roster slots.
+ENTRY_SLOT_START_COL: int = 4
+FLEX_SLOT: str = "FLEX"
 
 # --- Projections CSV headers ---
 # Internal column name -> the source headers that may carry it, in preference
@@ -766,6 +807,678 @@ def _assign_flex_positions(lineup: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
     return assigned_lineup
 
 
+# --- Late Swap ---
+
+
+@dataclass(frozen=True)
+class DkPoolPlayer:
+    """One player from the player pool section of a DraftKings entries file."""
+
+    dk_id: int
+    name: str
+    name_id: str  # DraftKings' "Name + ID" cell, copied verbatim into the upload
+    primary_slot: str  # "QB", "RB", "WR", "TE", or "DST"
+    flex_eligible: bool
+    salary: int
+    team: str
+    kickoff: Optional[datetime]  # None once Game Info stops carrying a start time
+    started: bool
+
+
+@dataclass(frozen=True)
+class DkEntry:
+    """One contest entry: its identifying cells and one cell per roster slot."""
+
+    entry_id: str
+    contest_name: str
+    contest_id: str
+    entry_fee: str
+    cells: List[str]
+
+
+def _game_info_timezone() -> tzinfo:
+    """Returns the Eastern zone Game Info kickoffs are written in."""
+    try:
+        return ZoneInfo(GAME_INFO_TIMEZONE)
+    except ZoneInfoNotFoundError as exc:
+        # Windows ships no zone database; Python reads it from the tzdata
+        # package instead.
+        raise ValueError(
+            f"Time zone '{GAME_INFO_TIMEZONE}' is unavailable. Install it with: "
+            f"venv/Scripts/python.exe -m pip install tzdata"
+        ) from exc
+
+
+def find_dk_entries_file(directory: Optional[str] = None) -> str:
+    """
+    Returns the newest DK_ENTRIES_GLOB match in the Downloads folder.
+
+    Raises:
+        FileNotFoundError: If the folder holds no entries file.
+    """
+    directory = directory or DOWNLOADS_DIR
+    matches = glob.glob(os.path.join(directory, DK_ENTRIES_GLOB))
+    if not matches:
+        raise FileNotFoundError(
+            f"No {DK_ENTRIES_GLOB} file found in {directory}. Download your "
+            f"entries CSV from DraftKings' Edit Entries page first."
+        )
+    newest = max(matches, key=os.path.getmtime)
+    if len(matches) > 1:
+        print(
+            f"  NOTE: {len(matches)} entries files in {directory}; using the "
+            f"newest, {os.path.basename(newest)}."
+        )
+    return newest
+
+
+def parse_kickoff(game_info: str, zone: tzinfo) -> Optional[datetime]:
+    """
+    Reads the kickoff out of a Game Info cell ("GB@MIN 09/13/2026 04:25PM ET").
+
+    Returns:
+        The kickoff as an aware datetime, or None when the cell carries no
+        start time -- "In Progress", "Final", or anything unrecognized.
+    """
+    match = KICKOFF_PATTERN.search(game_info)
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), KICKOFF_FORMAT).replace(tzinfo=zone)
+    except ValueError:
+        return None
+
+
+def load_dk_entries_file(
+    path: str, now: datetime
+) -> Tuple[List[str], List[str], List[DkEntry], Dict[int, DkPoolPlayer]]:
+    """
+    Reads the contest entries and the player pool from a DraftKings entries file.
+
+    The file is jagged: entries fill the leading columns (Entry ID, Contest
+    Name, Contest ID, Entry Fee, then one column per roster slot) and the
+    player pool sits to their right under its own "Name + ID" header, a few
+    rows down. A pool player counts as started when his Game Info no longer
+    shows a future kickoff as of `now`, or when DraftKings has tagged him
+    LOCKED; a Game Info the parser cannot read counts as started too, so an
+    unreadable time can never let a player be swapped in after his game began.
+
+    Args:
+        path: Location of the entries file.
+        now: The moment eligibility is judged at (an aware datetime).
+
+    Returns:
+        (upload header, slot labels, entries, pool keyed by DraftKings ID).
+
+    Raises:
+        ValueError: If the file is not a Classic entries file or has no pool.
+    """
+    try:
+        with open(path, newline="", encoding="utf-8-sig") as handle:
+            rows = list(csv.reader(handle))
+    except OSError as exc:
+        raise FileNotFoundError(f"Could not read {path}: {exc}") from exc
+
+    filename = os.path.basename(path)
+    if not rows or not rows[0] or rows[0][0].strip() != "Entry ID":
+        raise ValueError(f"{filename} is not a DraftKings entries file (no 'Entry ID' header).")
+
+    width = ENTRY_SLOT_START_COL + ROSTER_SIZE
+    upload_header = rows[0][:width]
+    slot_labels: List[str] = []
+    for label in rows[0][ENTRY_SLOT_START_COL:]:
+        if not label.strip():
+            break
+        slot_labels.append(label.strip().upper())
+    if len(slot_labels) != ROSTER_SIZE:
+        raise ValueError(
+            f"{filename} has {len(slot_labels)} roster slots "
+            f"({', '.join(slot_labels)}); late swap needs a Classic entries file "
+            f"with {ROSTER_SIZE}."
+        )
+
+    entries: List[DkEntry] = []
+    for cells in rows[1:]:
+        if not cells or not cells[0].strip():
+            continue
+        padded = cells[:width] + [""] * (width - len(cells))
+        entries.append(
+            DkEntry(
+                entry_id=padded[0],
+                contest_name=padded[1],
+                contest_id=padded[2].strip(),
+                entry_fee=padded[3],
+                cells=padded[ENTRY_SLOT_START_COL:width],
+            )
+        )
+    if not entries:
+        raise ValueError(f"{filename} lists no contest entries.")
+
+    header_idx = next(
+        (idx for idx, cells in enumerate(rows) if "Name + ID" in cells), None
+    )
+    if header_idx is None:
+        raise ValueError(f"{filename} has no player pool section ('Name + ID' header).")
+    pool_header = rows[header_idx]
+    needed = ("Name + ID", "Name", "ID", "Roster Position", "Salary", "Game Info", "TeamAbbrev")
+    missing = [name for name in needed if name not in pool_header]
+    if missing:
+        raise ValueError(f"{filename}'s player pool is missing column(s): {', '.join(missing)}.")
+    col = {name: pool_header.index(name) for name in needed}
+
+    zone = now.tzinfo or _game_info_timezone()
+    pool: Dict[int, DkPoolPlayer] = {}
+    for cells in rows[header_idx + 1 :]:
+        if len(cells) <= max(col.values()):
+            continue
+        try:
+            dk_id = int(cells[col["ID"]].strip())
+            salary = int(cells[col["Salary"]].strip())
+        except ValueError:
+            continue
+        # "RB/FLEX" -> primary slot RB, FLEX-eligible.
+        slots = [s.strip().upper() for s in cells[col["Roster Position"]].split("/") if s.strip()]
+        if not slots:
+            continue
+        name_id = cells[col["Name + ID"]]
+        kickoff = parse_kickoff(cells[col["Game Info"]], zone)
+        pool[dk_id] = DkPoolPlayer(
+            dk_id=dk_id,
+            name=cells[col["Name"]].strip(),
+            name_id=name_id,
+            primary_slot=slots[0],
+            flex_eligible=FLEX_SLOT in slots[1:],
+            salary=salary,
+            team=cells[col["TeamAbbrev"]].strip(),
+            kickoff=kickoff,
+            started=DK_LOCKED_TAG in name_id or kickoff is None or kickoff <= now,
+        )
+    if not pool:
+        raise ValueError(f"{filename}'s player pool has no readable players.")
+    return upload_header, slot_labels, entries, pool
+
+
+def _split_entry_slots(
+    entry: DkEntry, pool: Dict[int, DkPoolPlayer]
+) -> Tuple[List[Optional[int]], Set[int], List[int]]:
+    """
+    Sorts an entry's slots into locked and open.
+
+    A slot is locked when its player's game has started (or DraftKings tagged
+    the cell LOCKED), and also when its ID is missing from the pool -- the
+    caller leaves such an entry unchanged, since that player's salary is
+    unknown. Blank cells (reservations) and unstarted players are open.
+
+    Returns:
+        (DraftKings ID per slot or None, locked slot indices, open slot indices).
+    """
+    original_ids: List[Optional[int]] = []
+    locked: Set[int] = set()
+    open_slots: List[int] = []
+    for idx, cell in enumerate(entry.cells):
+        match = DK_ID_PATTERN.search(cell)
+        dk_id = int(match.group(1)) if match else None
+        original_ids.append(dk_id)
+        if dk_id is None:
+            open_slots.append(idx)
+            continue
+        player = pool.get(dk_id)
+        if player is None or player.started or DK_LOCKED_TAG in cell:
+            locked.add(idx)
+        else:
+            open_slots.append(idx)
+    return original_ids, locked, open_slots
+
+
+def _ids_for_names(players_df: pd.DataFrame, names: Optional[List[str]], action: str) -> Set[int]:
+    """Resolves -l / -x player names (case-insensitive) to DraftKings IDs."""
+    ids: Set[int] = set()
+    for name in names or []:
+        matches = players_df[players_df["Player"].str.lower() == name.lower()]
+        if matches.empty:
+            print(f"  WARNING: Player '{name}' not found in projections. Skipping {action}.")
+            continue
+        ids.update(int(dk_id) for dk_id in matches["ID"])
+    return ids
+
+
+def optimize_late_swap_entry(
+    open_labels: List[str],
+    locked_ids: List[int],
+    pool: Dict[int, DkPoolPlayer],
+    candidates: Dict[int, DkPoolPlayer],
+    projections: Dict[int, Dict[str, Any]],
+    target: str,
+    args: argparse.Namespace,
+    lock_ids: Set[int],
+    previous: List[FrozenSet[int]],
+) -> Optional[List[int]]:
+    """
+    Picks the best players for one entry's open slots.
+
+    Same count-identity model as the full optimizer, sized to the open slots:
+    each open positional slot needs a player of that position, and the open
+    FLEX (if any) takes exactly one surplus RB/WR/TE. Locked players are fixed
+    constants -- their salary comes off the cap, they count toward the games
+    and TE limits, and they count toward shared players under -u -- but the
+    stacking and DST rules bind new picks only: a locked player's teammates
+    and opponents have started too, so no new pick could change those rules'
+    outcome for him.
+
+    Args:
+        open_labels: Roster slot label of each open slot ("RB", "FLEX", ...).
+        locked_ids: DraftKings IDs of the entry's locked players.
+        pool: Every player in the entries file, keyed by DraftKings ID.
+        candidates: Players eligible to be swapped in (unstarted, projected,
+            not excluded).
+        projections: Projection rows keyed by DraftKings ID.
+        target: Optimization target key.
+        args: Parsed CLI options (stack, stack_rb, max_te, no_dst_opp,
+            min_uniques).
+        lock_ids: IDs from -l; forced in wherever they fit an open slot.
+        previous: Lineups already built for this contest, for -u.
+
+    Returns:
+        The chosen DraftKings IDs (one per open slot, unordered), or None when
+        no valid set exists.
+    """
+    open_counts = Counter(label for label in open_labels if label != FLEX_SLOT)
+    open_flex = len(open_labels) - sum(open_counts.values())
+    flex_positions = {p.primary_slot for p in pool.values() if p.flex_eligible}
+
+    # Only players who fit one of the open slots get a variable.
+    fits = {
+        dk_id: player
+        for dk_id, player in candidates.items()
+        if player.primary_slot in open_counts or (open_flex and player.flex_eligible)
+    }
+
+    def members(predicate) -> List[int]:
+        return [dk_id for dk_id, player in fits.items() if predicate(player)]
+
+    prob = pulp.LpProblem("DraftKings_NFL_Late_Swap", pulp.LpMaximize)
+    pick = pulp.LpVariable.dicts("Pick", list(fits), cat="Binary")
+    prob += pulp.lpSum(target_value(projections[i], target) * pick[i] for i in fits)
+
+    locked_players = [pool[i] for i in locked_ids]
+    prob += (
+        pulp.lpSum(fits[i].salary * pick[i] for i in fits)
+        <= SALARY_CAP - sum(p.salary for p in locked_players),
+        "Salary_Cap",
+    )
+    prob += pulp.lpSum(pick[i] for i in fits) == len(open_labels), "Open_Slots"
+
+    # Every open positional slot needs its own position; the FLEX surplus must
+    # be FLEX-eligible. With the slot total above, these two force exactly one
+    # surplus RB/WR/TE per open FLEX and no surplus anywhere else.
+    for slot, count in open_counts.items():
+        eligible = members(lambda p, slot=slot: p.primary_slot == slot)
+        if len(eligible) < count:
+            return None
+        prob += pulp.lpSum(pick[i] for i in eligible) >= count, f"Min_{slot}"
+    flex_needed = open_flex + sum(c for s, c in open_counts.items() if s in flex_positions)
+    flex_members = members(lambda p: p.flex_eligible)
+    if len(flex_members) < flex_needed:
+        return None
+    if flex_members:
+        prob += pulp.lpSum(pick[i] for i in flex_members) == flex_needed, "FLEX_Logic"
+
+    # At least two games across the whole lineup. Started and unstarted games
+    # never overlap, so locked games simply add to the count.
+    def game_key(dk_id: int) -> Any:
+        if dk_id in projections:
+            return projections[dk_id]["game_id"]
+        return frozenset([pool[dk_id].team])
+
+    locked_games = {game_key(i) for i in locked_ids}
+    if len(locked_games) < 2:
+        games: Dict[Any, List[int]] = defaultdict(list)
+        for i in fits:
+            games[game_key(i)].append(i)
+        game_vars = pulp.LpVariable.dicts("Game", range(len(games)), cat="Binary")
+        for g_idx, game_members in enumerate(games.values()):
+            # A game counts only when someone from it is actually picked.
+            prob += game_vars[g_idx] <= pulp.lpSum(pick[i] for i in game_members)
+        prob += (
+            pulp.lpSum(game_vars.values()) >= 2 - len(locked_games),
+            "At_Least_Two_Games",
+        )
+
+    if args.max_te is not None:
+        locked_te = sum(1 for p in locked_players if p.primary_slot == "TE")
+        tes = members(lambda p: p.primary_slot == "TE")
+        if tes:
+            prob += (
+                pulp.lpSum(pick[i] for i in tes) <= max(args.max_te - locked_te, 0),
+                "Max_TE_Constraint",
+            )
+
+    def team(dk_id: int) -> str:
+        return str(projections[dk_id]["Team"])
+
+    for qb in members(lambda p: p.primary_slot == "QB"):
+        if args.stack > 0:
+            mates = [
+                i for i in fits
+                if team(i) == team(qb) and fits[i].primary_slot in ("WR", "TE")
+            ]
+            prob += pulp.lpSum(pick[i] for i in mates) >= args.stack * pick[qb]
+        if args.stack_rb:
+            mates = [i for i in fits if team(i) == team(qb) and fits[i].primary_slot == "RB"]
+            prob += pulp.lpSum(pick[i] for i in mates) >= pick[qb]
+
+    if args.no_dst_opp:
+        for dst in members(lambda p: p.primary_slot == "DST"):
+            opp = str(projections[dst]["Opp"]).replace("@", "")
+            for off in members(lambda p: p.primary_slot != "DST"):
+                if team(off) == opp:
+                    prob += pick[dst] + pick[off] <= 1
+
+    for dk_id in lock_ids & fits.keys():
+        prob += pick[dk_id] == 1
+
+    # -u against the lineups already built for this contest. Locked overlap is
+    # fixed, so where it alone exceeds the allowance the best achievable is no
+    # further overlap among the new picks.
+    locked_set = set(locked_ids)
+    for prev in previous:
+        shared = [i for i in fits if i in prev]
+        if shared:
+            allowance = ROSTER_SIZE - args.min_uniques - len(locked_set & prev)
+            prob += pulp.lpSum(pick[i] for i in shared) <= max(allowance, 0)
+
+    prob.solve(pulp.PULP_CBC_CMD(msg=0))
+    if pulp.LpStatus[prob.status] != "Optimal":
+        return None
+    return [i for i in fits if pick[i].varValue > 0.5]
+
+
+def _seat_open_slots(
+    open_slots: List[int], slot_labels: List[str], picks: List[DkPoolPlayer]
+) -> Optional[Dict[int, DkPoolPlayer]]:
+    """
+    Seats the solver's picks in an entry's open slots.
+
+    The model chooses players by position count, so seating is post-hoc, as
+    in the full optimizer. Within a position, earlier kickoffs take the
+    positional slots and the surplus goes to FLEX, so FLEX holds the latest
+    game on the lineup: a FLEX player can be swapped for any RB/WR/TE on a
+    later late-swap run, which keeps the most options open.
+
+    Returns:
+        Slot index -> player, or None if the picks cannot fill the slots.
+    """
+    positional: Dict[str, List[int]] = defaultdict(list)
+    flex_slots: List[int] = []
+    for idx in open_slots:
+        if slot_labels[idx] == FLEX_SLOT:
+            flex_slots.append(idx)
+        else:
+            positional[slot_labels[idx]].append(idx)
+
+    by_position: Dict[str, List[DkPoolPlayer]] = defaultdict(list)
+    for player in picks:
+        by_position[player.primary_slot].append(player)
+
+    seated: Dict[int, DkPoolPlayer] = {}
+    surplus: List[DkPoolPlayer] = []
+    for position, players in by_position.items():
+        # Earliest kickoff first; within one kickoff, highest salary first
+        # (the full optimizer's order), so the cheapest late player is surplus.
+        players.sort(key=lambda p: (p.kickoff.timestamp() if p.kickoff else 0.0, -p.salary))
+        slots = positional.get(position, [])
+        seated.update(zip(slots, players))
+        surplus.extend(players[len(slots) :])
+    if len(surplus) != len(flex_slots) or any(not p.flex_eligible for p in surplus):
+        return None
+    seated.update(zip(flex_slots, surplus))
+    return seated if len(seated) == len(open_slots) else None
+
+
+def _print_late_swap_entry(
+    number: int,
+    total: int,
+    entry: DkEntry,
+    slot_labels: List[str],
+    final_ids: List[Optional[int]],
+    original_ids: List[Optional[int]],
+    locked: Set[int],
+    pool: Dict[int, DkPoolPlayer],
+    projections: Dict[int, Dict[str, Any]],
+    target: str,
+    note: str,
+) -> None:
+    """Prints one late-swapped entry with a per-slot LOCKED/KEEP/MOVE/NEW status."""
+
+    def stat(dk_id: Optional[int], column: str) -> float:
+        row = projections.get(dk_id) if dk_id is not None else None
+        return float(row[column]) if row else 0.0
+
+    def score(ids: List[Optional[int]]) -> float:
+        return sum(target_value(projections[i], target) for i in ids if i in projections)
+
+    target_label = OPTIMIZATION_TARGETS[target][0]
+    present = [i for i in final_ids if i is not None]
+    salary = sum(pool[i].salary for i in present if i in pool)
+    before, after = score(original_ids), score(final_ids)
+    # The target's before -> after leads; the other totals describe the result.
+    parts = [f"{target_label}: {before:.2f} -> {after:.2f} ({after - before:+.2f})"]
+    parts += [
+        f"{column}: {sum(stat(i, column) for i in present):.2f}"
+        for column in ("Projection", "Ceiling")
+        if column != target_label
+    ]
+    parts.append(f"Ownership: {sum(stat(i, 'Ownership') for i in present):.2f}%")
+    parts.append(f"Salary: ${salary:,}")
+    print(f"\n--- Entry {number}/{total}: {entry.entry_id} | {entry.contest_name} ---")
+    print(" | ".join(parts))
+    if note:
+        print(f"  NOTE: {note}")
+    print("-" * 97)
+    print(
+        f"{'Slot':<5} {'Player':<25} {'Pos':<5} {'Team':<5} "
+        f"{'Salary':>8} {'Proj':>8} {'Own%':>8} {'Ceiling':>8}  Status"
+    )
+    print("-" * 97)
+    original_set = {i for i in original_ids if i is not None}
+    for idx, dk_id in enumerate(final_ids):
+        if dk_id is None:
+            print(f"{slot_labels[idx]:<5} - EMPTY -")
+            continue
+        if idx in locked:
+            status = "LOCKED"
+        elif dk_id == original_ids[idx]:
+            status = "KEEP"
+        elif dk_id in original_set:
+            status = "MOVE"
+        else:
+            status = "NEW"
+        player = pool.get(dk_id)
+        name = player.name if player else entry.cells[idx]
+        position = player.primary_slot if player else ""
+        team = player.team if player else ""
+        player_salary = player.salary if player else 0
+        print(
+            f"{slot_labels[idx]:<5} {name[:25]:<25} {position:<5} {team:<5} "
+            f"${player_salary:>7,} {stat(dk_id, 'Projection'):>8.2f} "
+            f"{stat(dk_id, 'Ownership'):>7.2f}% {stat(dk_id, 'Ceiling'):>8.2f}  {status}"
+        )
+    print("-" * 97)
+
+
+def run_late_swap(
+    args: argparse.Namespace,
+    players_df: pd.DataFrame,
+    target: str,
+    now: Optional[datetime] = None,
+) -> Optional[str]:
+    """
+    Late-swaps every entry in the newest DraftKings entries file in Downloads.
+
+    Players whose games have started stay in their slots. Every other slot is
+    re-optimized from the players whose games have not started, and each
+    entry must differ from the entries already built for the same contest by
+    -u players. An entry with no valid swap is written back unchanged. The
+    result is an upload-ready-DKEntries-<timestamp>.csv in Downloads holding
+    every entry, each cell DraftKings' own "Name + ID" text.
+
+    Args:
+        args: Parsed CLI options.
+        players_df: Projections from load_player_data(); matched by DK ID.
+        target: Optimization target key.
+        now: Moment eligibility is judged at; defaults to the current time.
+
+    Returns:
+        Path of the upload file written, or None if nothing was written.
+    """
+    zone = _game_info_timezone()
+    now = now.astimezone(zone) if now else datetime.now(zone)
+
+    entries_path = find_dk_entries_file()
+    upload_header, slot_labels, entries, pool = load_dk_entries_file(entries_path, now)
+    contests = {entry.contest_id for entry in entries}
+    print("\n--- Late Swap ---")
+    print(f"Entries file: {entries_path}")
+    print(
+        f"Clock: {now:%m/%d/%Y %I:%M%p} ET. {len(entries)} entries across "
+        f"{len(contests)} contest(s)."
+    )
+    if args.num_lineups != 1 or args.export:
+        print(
+            "  NOTE: -n and -e do not apply to --late-swap; every entry is "
+            "re-optimized and written to the upload file."
+        )
+
+    projections = (
+        players_df.drop_duplicates("ID").set_index("ID", drop=False).to_dict("index")
+    )
+    if not pool.keys() & projections.keys():
+        raise ValueError(
+            f"No projections ID matches a DraftKings ID in {os.path.basename(entries_path)}. "
+            f"Late swap matches players by DraftKings ID, so the projections file "
+            f"must carry DraftKings player IDs in its ID column."
+        )
+
+    if args.lock:
+        print(f"\nLocking players: {args.lock}")
+    lock_ids = _ids_for_names(players_df, args.lock, "lock")
+    started_locks = sorted(pool[i].name for i in lock_ids if i in pool and pool[i].started)
+    if started_locks:
+        print(
+            f"  NOTE: Games have started for {', '.join(started_locks)}; they "
+            f"stay only in the entries that already roster them."
+        )
+    if args.exclude:
+        print(f"\nExcluding players: {args.exclude}")
+    exclude_ids = _ids_for_names(players_df, args.exclude, "exclusion")
+
+    candidates = {
+        dk_id: player
+        for dk_id, player in pool.items()
+        if not player.started and dk_id in projections and dk_id not in exclude_ids
+    }
+    unprojected = sorted(
+        p.name for p in pool.values() if not p.started and p.dk_id not in projections
+    )
+    started_count = sum(1 for p in pool.values() if p.started)
+    print(
+        f"{started_count} of {len(pool)} pool players' games have started; "
+        f"{len(candidates)} players are eligible to swap in."
+    )
+    if unprojected:
+        names = ", ".join(unprojected[:5])
+        if len(unprojected) > 5:
+            names += f", +{len(unprojected) - 5} more"
+        print(
+            f"  NOTE: {len(unprojected)} unstarted player(s) have no projection "
+            f"and cannot be swapped in: {names}"
+        )
+
+    history: Dict[str, List[FrozenSet[int]]] = defaultdict(list)
+    upload_rows: List[List[str]] = []
+    changed = unchanged_locked = failed = 0
+
+    for number, entry in enumerate(entries, start=1):
+        original_ids, locked, open_slots = _split_entry_slots(entry, pool)
+        locked_ids = [original_ids[idx] for idx in sorted(locked)]
+        final_ids = list(original_ids)
+        note = ""
+        unknown = [entry.cells[idx] for idx in sorted(locked) if original_ids[idx] not in pool]
+
+        if unknown:
+            failed += 1
+            note = (
+                f"{', '.join(unknown)} not in the player pool, so the salary "
+                f"left under the cap is unknown; entry left unchanged."
+            )
+        elif not open_slots:
+            unchanged_locked += 1
+            note = "every slot is locked; nothing to swap."
+        else:
+            open_labels = [slot_labels[idx] for idx in open_slots]
+            previous = history[entry.contest_id]
+
+            def solve(prev: List[FrozenSet[int]]) -> Optional[Dict[int, DkPoolPlayer]]:
+                picks = optimize_late_swap_entry(
+                    open_labels, locked_ids, pool, candidates, projections,
+                    target, args, lock_ids, prev,
+                )
+                if picks is None:
+                    return None
+                return _seat_open_slots(open_slots, slot_labels, [pool[i] for i in picks])
+
+            seated = solve(previous)
+            if seated is None and previous:
+                seated = solve([])
+                if seated is not None:
+                    note = (
+                        f"could not differ by {args.min_uniques} from every earlier "
+                        f"entry in this contest; built without that rule."
+                    )
+            if seated is None:
+                failed += 1
+                note = (
+                    "no swap fits the salary cap and your rules "
+                    "(-l/-x/-s/-srb/-te/-ndo); entry left unchanged."
+                )
+            else:
+                for idx, player in seated.items():
+                    final_ids[idx] = player.dk_id
+
+        if final_ids != original_ids:
+            changed += 1
+        history[entry.contest_id].append(
+            frozenset(i for i in final_ids if i is not None)
+        )
+        # A cell whose player did not change is copied verbatim; a new one gets
+        # the pool's "Name + ID" text, exactly as DraftKings wrote it.
+        cells = [
+            entry.cells[idx] if dk_id == original_ids[idx] else pool[dk_id].name_id
+            for idx, dk_id in enumerate(final_ids)
+        ]
+        upload_rows.append(
+            [entry.entry_id, entry.contest_name, entry.contest_id, entry.entry_fee, *cells]
+        )
+        _print_late_swap_entry(
+            number, len(entries), entry, slot_labels, final_ids, original_ids,
+            locked, pool, projections, target, note,
+        )
+
+    print(
+        f"\nLate swap complete: {changed} of {len(entries)} entries changed, "
+        f"{unchanged_locked} fully locked, {failed} with no valid swap."
+    )
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    output_path = os.path.join(DOWNLOADS_DIR, f"{UPLOAD_FILE_PREFIX}-{timestamp}.csv")
+    with open(output_path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(upload_header)
+        writer.writerows(upload_rows)
+    print(f"Upload file written to: {output_path}")
+    return output_path
+
+
 def main() -> None:
     """Main orchestrator function for the script."""
     parser = argparse.ArgumentParser(
@@ -861,6 +1574,17 @@ def main() -> None:
         action="store_true",
         help="Optimize on an equally weighted 50/50 blend of projection and ceiling.",
     )
+    parser.add_argument(
+        "-ls",
+        "--late-swap",
+        action="store_true",
+        help=(
+            "Late-swap the entries in the newest DKEntries*.csv in Downloads: "
+            "players whose games have started stay put, every other slot is "
+            "re-optimized, and upload-ready-DKEntries-<timestamp>.csv is written "
+            "to Downloads. -u applies within each contest; -n and -e are ignored."
+        ),
+    )
     args = parser.parse_args()
 
     try:
@@ -874,6 +1598,10 @@ def main() -> None:
         players_df = load_player_data(args.filepath, ownership_field)
         print(f"Optimizing on: {target_label}.")
         validate_target_data(players_df, target)
+
+        if args.late_swap:
+            run_late_swap(args, players_df, target)
+            return
 
         players_dict = players_df.to_dict("index")
         player_indices = list(players_dict.keys())

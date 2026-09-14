@@ -19,8 +19,9 @@ python -m venv venv
 venv/Scripts/python.exe -m pip install -r requirements.txt
 ```
 
-Requirements: `pandas`, `pulp`, `highspy`. The Showdown optimizer needs `highspy`; the two
-Classic optimizers use the CBC solver that ships with PuLP.
+Requirements: `pandas`, `pulp`, `highspy`, `tzdata`. The Showdown optimizer needs `highspy`;
+the Classic optimizer uses the CBC solver that ships with PuLP. `tzdata` supplies the Eastern
+time zone late swap reads kickoffs in (Windows has no built-in zone database).
 
 ## Running
 
@@ -42,6 +43,9 @@ python NFL-Multi-Opto-v2.0.py "C:\path\to\projections.csv" -n 20 -u 2 -c -e
 
 # 20 Showdown lineups on a 50/50 blend of projection and ceiling
 python NFL-SD-Multi-Opto-v1.0.py "C:\path\to\showdown.csv" -n 20 -u 2 -pj -e
+
+# Late swap: re-optimize every entry in Downloads\DKEntries.csv around the games already started
+python NFL-Multi-Opto-v2.0.py "C:\path\to\projections.csv" -ls -u 2
 ```
 
 Lineups print to the terminal as a formatted table with total projection, ownership, ceiling,
@@ -66,6 +70,7 @@ and salary. Nothing is written to disk unless you pass `-e`.
 | `-c`, `--ceiling` | Optimize on ceiling instead of projection |
 | `-pj`, `--projceiling` | Optimize on a 50/50 blend of projection and ceiling |
 | `-sf`, `--small-field` | Show small-field ownership instead of large-field (display/export only) |
+| `-ls`, `--late-swap` | Late-swap your DraftKings entries instead of building new lineups — see [Late swap](#late-swap) |
 
 Name matching for `-l` and `-x` is case-insensitive. A name that isn't in the projections file
 prints a warning and is skipped rather than failing the run.
@@ -227,6 +232,42 @@ pool section starts at row 8 with its own header, listing `Position`, `Name + ID
 * **If the file isn't there, the upload row is simply skipped** and the export continues from
   the `TOTAL` row to the next lineup. The same happens for an individual lineup if any of its
   players can't be matched — the script prints which player it couldn't resolve.
+
+## Late swap
+
+`-ls` re-optimizes the lineups you have already entered, mid-slate. Download your entries CSV
+from DraftKings' Edit Entries page and run the Classic optimizer with your current projections:
+
+```bash
+python NFL-Multi-Opto-v2.0.py "C:\path\to\projections.csv" -ls -u 2
+```
+
+* **Input** — the newest `DKEntries*.csv` in your Downloads folder, so a browser re-download
+  such as `DKEntries (1).csv` is picked up automatically. Classic entries files only.
+* **Who is locked** — a player whose game has started, judged from the file's `Game Info`
+  column against the clock when you run the script (kickoffs are Eastern). `In Progress`
+  counts as started, and so does DraftKings' own `(LOCKED)` tag. A locked player stays in his
+  slot.
+* **Who can swap in** — only players whose games have not started. Unstarted players already
+  in a lineup are fair game: the optimizer may keep them, move them to another slot, or
+  replace them. Players are matched to your projections by DraftKings ID, so a player with no
+  projection can't be swapped in.
+* **FLEX** — the new picks' position counts decide which position supplies the FLEX; within
+  that position, the player with the latest kickoff sits there, which keeps the most options
+  open if you late-swap again later.
+* **`-u`** — enforced between entries in the same contest only; entries in different contests
+  may end up identical. When locked players alone already make two entries overlap more than
+  `-u` allows, the new picks must all differ. If an entry can't meet `-u` at all, it is built
+  without it and the script says so.
+* **Rules** — `-l`, `-x`, `-s`, `-srb`, `-te`, `-ndo`, `-c`, `-pj` and `-sf` apply to the new
+  picks. `-n` and `-e` are ignored. An entry with no swap that fits the cap and your rules is
+  written back unchanged, with a note.
+* **Output** — `upload-ready-DKEntries-<timestamp>.csv` in Downloads, holding every entry
+  (changed or not) in DraftKings' upload layout. Each cell is DraftKings' own `Name + ID`
+  text, `(LOCKED)` tag included, ready to upload on the Edit Entries page.
+
+Each entry prints with a status per slot: `LOCKED` (game started), `KEEP` (same player, same
+slot), `MOVE` (already on the lineup, new slot), or `NEW` (swapped in).
 
 ## When fewer lineups come back than you asked for
 

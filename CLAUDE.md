@@ -27,13 +27,13 @@ venv/Scripts/python.exe NFL-SD-Multi-Opto-v1.0.py "C:\path\to\showdown.csv" -n 5
 venv/Scripts/python.exe NBA-Multi-Opto-v1.0.py   # no args; edit the constants at the top of the file
 ```
 
-Local env is a plain `venv/` (Python 3.13) plus `requirements.txt` (`pandas`, `pulp`, `highspy`). There is no lint or test command. Verification means running a script against a real projections CSV and reading the printed lineups.
+Local env is a plain `venv/` (Python 3.13) plus `requirements.txt` (`pandas`, `pulp`, `highspy`, `tzdata` — the Eastern zone for late swap; Windows has no zone database). There is no lint or test command. Verification means running a script against a real projections CSV and reading the printed lineups.
 
 Note: `.claude/hooks/session-start.sh` bootstraps with `uv sync` and a `.python-version` pin — neither `pyproject.toml` nor `.python-version` exists here, so that hook only matters if the repo is migrated to uv (it is gated on `CLAUDE_CODE_REMOTE=true` and no-ops locally).
 
 ### CLI flags (NFL scripts)
 
-`filepath` (required), `-n/--num-lineups`, `-u/--min-uniques`, `-e/--export`, `-l/--lock`, `-x/--exclude`, `-s/--stack N` (QB + N WR/TE same team), `-srb/--stack-rb`, `-te/--max-te`, `-ndo/--no-dst-opp`, `-ms/--max-salary` (Showdown only), `-c/--ceiling` and `-pj/--projceiling` (multi-lineup scripts only; mutually exclusive), `-sf/--small-field` (`NFL-Multi-Opto-v2.0.py` only; picks which ownership projection fills the display-only `Ownership` column).
+`filepath` (required), `-n/--num-lineups`, `-u/--min-uniques`, `-e/--export`, `-l/--lock`, `-x/--exclude`, `-s/--stack N` (QB + N WR/TE same team), `-srb/--stack-rb`, `-te/--max-te`, `-ndo/--no-dst-opp`, `-ms/--max-salary` (Showdown only), `-c/--ceiling` and `-pj/--projceiling` (multi-lineup scripts only; mutually exclusive), `-sf/--small-field` (`NFL-Multi-Opto-v2.0.py` only; picks which ownership projection fills the display-only `Ownership` column), `-ls/--late-swap` (`NFL-Multi-Opto-v2.0.py` only; see below).
 
 A single best lineup is `NFL-Multi-Opto-v2.0.py <file> -n 1` — there is no separate single-lineup script.
 
@@ -56,6 +56,7 @@ All scripts share one pattern: **build the PuLP problem once, then solve it repe
 - Diversity: `sum(vars of the just-solved lineup) <= ROSTER_SIZE - min_uniques`. Showdown's version is slot-aware — it sums `cpt_vars[captain]` plus the five `flex_vars`, which is why promoting a FLEX to Captain counts as two uniques.
 - Display slot assignment is post-hoc, not part of the model: `_assign_flex_positions()` fills RB/WR/TE slots by descending salary and drops the leftover FLEX-eligible player into FLEX.
 - A non-`Optimal` status breaks the loop; lineup #1 failing means the base constraints are infeasible, later failures just mean the pool is exhausted.
+- Late swap (`-ls`, `run_late_swap()`) is a separate path: `main()` returns after it, never building the model above. It reads the newest `DKEntries*.csv` in `DOWNLOADS_DIR`, and a slot is locked when its player's `Game Info` holds no future Eastern kickoff at runtime (or DK tagged `(LOCKED)`; unparseable counts as started). One small problem per entry, **rebuilt each entry**, over the open slots only: the same count identities scoped to the open labels; locked players are constants (salary, games, TE cap, `-u` overlap); stacks/`-ndo` bind new picks only. Diversity is per contest (`Contest ID`), with locked overlap as an unavoidable floor. Fallbacks: drop `-u`, then write the entry unchanged. Projections match the DK pool **by ID**, never name. `_seat_open_slots()` seats post-hoc: pick counts fix which position supplies FLEX, and within it the latest kickoff sits there. Output is `upload-ready-DKEntries-<timestamp>.csv` in Downloads: every entry, unchanged cells verbatim, new cells the pool's `Name + ID`.
 
 ## Input CSV expectations
 

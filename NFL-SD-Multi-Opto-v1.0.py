@@ -14,17 +14,20 @@ Showdown roster construction:
     - The lineup must contain at least one player from each of the two teams.
     - Total salary must stay within the $50,000 cap.
 
-The script is run from the command line, specifying the path to the
-projections CSV file as an argument.
+The script is run from the command line. It optimizes on the newest
+"DK NFL Showdown Projections*.csv" in your Downloads folder, or on the
+projections CSV whose path is given as the first argument (a file, not a
+folder).
 
 Input Arguments:
-    python NFL-SD-Multi-Opto-v1.0.py "path" -n -u -e -l -x -ms -c -pj -dk
-    python <script> <proj file> <# of lineups> <min uniques> <export to CSV> <lock players> <exclude players> <max salary> <optimize on ceiling> <optimize on 50/50 proj+ceiling> <DKEntries file path>
+    python NFL-SD-Multi-Opto-v1.0.py ["path"] -n -u -e -l -x -ms -c -pj -dk
+    python <script> <proj file (optional)> <# of lineups> <min uniques> <export to CSV> <lock players> <exclude players> <max salary> <optimize on ceiling> <optimize on 50/50 proj+ceiling> <DKEntries file path>
     # Means: python <script> <projections file> -n <number of lineups> -u <min uniques> -e <export to CSV>
     python NFL-SD-Multi-Opto-v1.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -e -l "Drake Maye:CPT" -ms 49800
     python NFL-SD-Multi-Opto-v1.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -c
     python NFL-SD-Multi-Opto-v1.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -pj
     python NFL-SD-Multi-Opto-v1.0.py "C:\\path\\to\\projections.csv" -n 5 -e -dk "C:\\path\\to\\DKEntries.csv"
+    python NFL-SD-Multi-Opto-v1.0.py -n 5 -u 2 -e
 
 DraftKings Entries File (-dk / --dk-entries):
     With -e, each lineup's export ends with an upload row of DraftKings
@@ -130,6 +133,11 @@ TARGET_FILE_SUFFIXES: Dict[str, str] = {
 # is picked up.
 DOWNLOADS_DIR: str = os.path.join(os.path.expanduser("~"), "Downloads")
 DK_ENTRIES_GLOB: str = "DKEntries*.csv"
+
+# Projections CSV: the newest match in Downloads unless the filepath argument
+# names one. Re-downloads ("... (1).csv") match too.
+PROJECTIONS_GLOB: str = "DK NFL Showdown Projections*.csv"
+
 # Name suffixes dropped when a projections name and a DraftKings name disagree.
 NAME_SUFFIXES: Tuple[str, ...] = ("jr", "sr", "ii", "iii", "iv", "v")
 
@@ -250,6 +258,62 @@ def _strip_name_suffix(normalized: str) -> str:
     return " ".join(parts)
 
 
+def _newest_download(pattern: str, directory: Optional[str] = None) -> Optional[str]:
+    """
+    Returns the most recently modified file in `directory` (default
+    DOWNLOADS_DIR) matching `pattern`, or None when nothing matches. The
+    newest wins, so a browser re-download ("... (1).csv") is picked up.
+    """
+    directory = directory or DOWNLOADS_DIR
+    # Escape the folder so a "[" in a Windows username is not read as a pattern.
+    matches = glob.glob(os.path.join(glob.escape(directory), pattern))
+    if not matches:
+        return None
+    newest = max(matches, key=os.path.getmtime)
+    if len(matches) > 1:
+        print(
+            f"  NOTE: {len(matches)} files match {pattern} in {directory}; "
+            f"using the newest, {os.path.basename(newest)}."
+        )
+    return newest
+
+
+def find_projections_file(
+    override: Optional[str] = None, directory: Optional[str] = None
+) -> str:
+    """
+    Picks the projections CSV this run optimizes on.
+
+    Args:
+        override: The filepath argument, used as given when supplied. It must
+            name a file; a folder is rejected rather than searched.
+        directory: Folder searched otherwise; defaults to DOWNLOADS_DIR.
+
+    Returns:
+        `override`, else the newest PROJECTIONS_GLOB match in the folder.
+
+    Raises:
+        FileNotFoundError: If `override` names no file, or no override was
+            given and the folder holds no projections file.
+    """
+    if override:
+        if os.path.isdir(override):
+            raise FileNotFoundError(
+                f"Expected a projections CSV file, not a folder: {override}"
+            )
+        if not os.path.isfile(override):
+            raise FileNotFoundError(f"Projections file not found at: {override}")
+        return override
+    path = _newest_download(PROJECTIONS_GLOB, directory)
+    if path is None:
+        raise FileNotFoundError(
+            f"No {PROJECTIONS_GLOB} file found in {directory or DOWNLOADS_DIR}. "
+            f"Download your projections, or pass the file's path as the first "
+            f"argument."
+        )
+    return path
+
+
 def find_dk_entries_file(
     override: Optional[str] = None, directory: Optional[str] = None
 ) -> Optional[str]:
@@ -272,18 +336,7 @@ def find_dk_entries_file(
         if not os.path.isfile(override):
             raise FileNotFoundError(f"DraftKings entries file not found: {override}")
         return override
-    directory = directory or DOWNLOADS_DIR
-    # Escape the folder so a "[" in a Windows username is not read as a pattern.
-    matches = glob.glob(os.path.join(glob.escape(directory), DK_ENTRIES_GLOB))
-    if not matches:
-        return None
-    newest = max(matches, key=os.path.getmtime)
-    if len(matches) > 1:
-        print(
-            f"  NOTE: {len(matches)} entries files in {directory}; using the "
-            f"newest, {os.path.basename(newest)}."
-        )
-    return newest
+    return _newest_download(DK_ENTRIES_GLOB, directory)
 
 
 def _find_dk_pool(
@@ -794,7 +847,11 @@ def main() -> None:
     parser.add_argument(
         "filepath",
         type=str,
-        help="Path to the DraftKings Showdown projections CSV file.",
+        nargs="?",
+        help=(
+            f"Path to the DraftKings Showdown projections CSV file. Omit it to "
+            f"use the newest {PROJECTIONS_GLOB} in Downloads."
+        ),
     )
     parser.add_argument(
         "-n",
@@ -899,7 +956,9 @@ def main() -> None:
         target_label = OPTIMIZATION_TARGETS[target][0]
 
         # --- 2. Load and prepare data ---
-        players_df = load_player_data(args.filepath)
+        projections_path = find_projections_file(args.filepath)
+        print(f"Projections file: {projections_path}")
+        players_df = load_player_data(projections_path)
         print(f"Optimizing on: {target_label}.")
         validate_target_data(players_df, target)
         players_dict = players_df.to_dict("index")

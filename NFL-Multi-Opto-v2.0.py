@@ -6,17 +6,28 @@ programming to find a specified number of unique, optimal lineups that
 maximize a chosen scoring target (projection, ceiling, or a 50/50 mix of the
 two), subject to DraftKings' classic NFL contest rules.
 
-The script is run from the command line, specifying the path to the
-projections CSV file as an argument.
+The script is run from the command line. It optimizes on the newest
+"DraftKings NFL DFS Projections*.csv" in your Downloads folder, or on the
+projections CSV whose path is given as the first argument.
 
 Input Arguments:
-    python NFL-Multi-Opto-v2.0.py "path" -n -u -e -te -x -l -s -srb -ndo -c -pj -sf -ls -dk
-    python <script> <proj file> <# of lineups> <min uniques> <max TE> <exclude> <export to CSV> <lock players> <stack QB with WR/TE> <stack QB with RB> <no DST vs Opp> <optimize on ceiling> <optimize on 50/50 proj+ceiling> <use small-field ownership> <late swap DKEntries.csv> <DKEntries file path>
+    python NFL-Multi-Opto-v2.0.py ["path"] -n -u -e -te -x -l -s -srb -ndo -c -pj -sf -ls -dk
+    python <script> <proj file (optional)> <# of lineups> <min uniques> <max TE> <exclude> <export to CSV> <lock players> <stack QB with WR/TE> <stack QB with RB> <no DST vs Opp> <optimize on ceiling> <optimize on 50/50 proj+ceiling> <use small-field ownership> <late swap DKEntries.csv> <DKEntries file path>
     python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -e -l "Josh Allen" -s -ndo
     python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -c
     python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -pj
     python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -ls -u 2
     python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -n 5 -e -dk "C:\\path\\to\\DKEntries.csv"
+    python NFL-Multi-Opto-v2.0.py -n 5 -u 2 -e
+
+Projections File (optional first argument):
+    Omitted, the newest "DraftKings NFL DFS Projections*.csv" in Downloads is
+    used -- Main, Early, and Late slate downloads and their "(1)" re-downloads
+    all match. Given, it must be the path to a file (a folder is rejected). The
+    slate is read from the file name: "Early Slate" and "Late Slate" label
+    each printed lineup and add "_early" / "_late" after "nfl_classic" in the
+    export file name; "Main Slate", or no slate in the name, is Main and keeps
+    the usual file name. Export contents do not change.
 
 DraftKings Entries File (-dk / --dk-entries):
     One entries file serves the whole run: the export's upload row, the
@@ -136,6 +147,20 @@ EXPORT_DIR: str = r"G:\My Drive\Documents\NFL-DFS\csv-exports"
 # ("SD-DKEntries.csv", "upload-ready-DKEntries-...") do not match.
 DOWNLOADS_DIR: str = os.path.join(os.path.expanduser("~"), "Downloads")
 DK_ENTRIES_GLOB: str = "DKEntries*.csv"
+
+# Projections CSV: the newest match in Downloads unless the filepath argument
+# names one. Main, Early, and Late slate downloads all match, re-downloads
+# ("... (1).csv") included.
+PROJECTIONS_GLOB: str = "DraftKings NFL DFS Projections*.csv"
+# The slate is read from the file name ("... -- Main Slate.csv", "... - Early
+# Slate.csv"). A name without one -- a bare "DraftKings NFL DFS
+# Projections.csv", or any file passed by path -- is treated as Main.
+SLATE_MAIN: str = "Main"
+SLATE_PATTERN = re.compile(r"\b(main|early|late)\s+slate\b", re.IGNORECASE)
+# Slate -> the tag inserted into the export file name after "nfl_classic".
+# Main keeps the historical name.
+SLATE_FILE_TAGS: Dict[str, str] = {"Main": "", "Early": "_early", "Late": "_late"}
+
 # Name suffixes dropped when a projections name and a DraftKings name disagree.
 NAME_SUFFIXES: Tuple[str, ...] = ("jr", "sr", "ii", "iii", "iv", "v")
 
@@ -337,6 +362,68 @@ def _strip_name_suffix(normalized: str) -> str:
     return " ".join(parts)
 
 
+def _newest_download(pattern: str, directory: Optional[str] = None) -> Optional[str]:
+    """
+    Returns the most recently modified file in `directory` (default
+    DOWNLOADS_DIR) matching `pattern`, or None when nothing matches. The
+    newest wins, so a browser re-download ("... (1).csv") is picked up.
+    """
+    directory = directory or DOWNLOADS_DIR
+    # Escape the folder so a "[" in a Windows username is not read as a pattern.
+    matches = glob.glob(os.path.join(glob.escape(directory), pattern))
+    if not matches:
+        return None
+    newest = max(matches, key=os.path.getmtime)
+    if len(matches) > 1:
+        print(
+            f"  NOTE: {len(matches)} files match {pattern} in {directory}; "
+            f"using the newest, {os.path.basename(newest)}."
+        )
+    return newest
+
+
+def find_projections_file(
+    override: Optional[str] = None, directory: Optional[str] = None
+) -> str:
+    """
+    Picks the projections CSV this run optimizes on.
+
+    Args:
+        override: The filepath argument, used as given when supplied. It must
+            name a file; a folder is rejected rather than searched.
+        directory: Folder searched otherwise; defaults to DOWNLOADS_DIR.
+
+    Returns:
+        `override`, else the newest PROJECTIONS_GLOB match in the folder.
+
+    Raises:
+        FileNotFoundError: If `override` names no file, or no override was
+            given and the folder holds no projections file.
+    """
+    if override:
+        if os.path.isdir(override):
+            raise FileNotFoundError(
+                f"Expected a projections CSV file, not a folder: {override}"
+            )
+        if not os.path.isfile(override):
+            raise FileNotFoundError(f"Projections file not found at: {override}")
+        return override
+    path = _newest_download(PROJECTIONS_GLOB, directory)
+    if path is None:
+        raise FileNotFoundError(
+            f"No {PROJECTIONS_GLOB} file found in {directory or DOWNLOADS_DIR}. "
+            f"Download your projections, or pass the file's path as the first "
+            f"argument."
+        )
+    return path
+
+
+def detect_slate(path: str) -> str:
+    """Returns "Main", "Early", or "Late" from a projections file name; Main by default."""
+    match = SLATE_PATTERN.search(os.path.basename(path))
+    return match.group(1).title() if match else SLATE_MAIN
+
+
 def find_dk_entries_file(
     override: Optional[str] = None, directory: Optional[str] = None
 ) -> Optional[str]:
@@ -359,18 +446,7 @@ def find_dk_entries_file(
         if not os.path.isfile(override):
             raise FileNotFoundError(f"DraftKings entries file not found: {override}")
         return override
-    directory = directory or DOWNLOADS_DIR
-    # Escape the folder so a "[" in a Windows username is not read as a pattern.
-    matches = glob.glob(os.path.join(glob.escape(directory), DK_ENTRIES_GLOB))
-    if not matches:
-        return None
-    newest = max(matches, key=os.path.getmtime)
-    if len(matches) > 1:
-        print(
-            f"  NOTE: {len(matches)} entries files in {directory}; using the "
-            f"newest, {os.path.basename(newest)}."
-        )
-    return newest
+    return _newest_download(DK_ENTRIES_GLOB, directory)
 
 
 def _find_dk_pool(
@@ -1442,6 +1518,7 @@ def run_late_swap(
     players_df: pd.DataFrame,
     target: str,
     now: Optional[datetime] = None,
+    slate: str = SLATE_MAIN,
 ) -> Optional[str]:
     """
     Late-swaps every entry in the DraftKings entries file (-dk, else the
@@ -1459,6 +1536,7 @@ def run_late_swap(
         players_df: Projections from load_player_data(); matched by DK ID.
         target: Optimization target key.
         now: Moment eligibility is judged at; defaults to the current time.
+        slate: The projections file's slate, shown in the heading.
 
     Returns:
         Path of the upload file written, or None if nothing was written.
@@ -1475,7 +1553,7 @@ def run_late_swap(
         )
     upload_header, slot_labels, entries, pool = load_dk_entries_file(entries_path, now)
     contests = {entry.contest_id for entry in entries}
-    print("\n--- Late Swap ---")
+    print(f"\n--- Late Swap ({slate} Slate) ---")
     print(f"Entries file: {entries_path}")
     print(
         f"Clock: {now:%m/%d/%Y %I:%M%p} ET. {len(entries)} entries across "
@@ -1633,7 +1711,11 @@ def main() -> None:
     parser.add_argument(
         "filepath",
         type=str,
-        help="Path to the DraftKings projections CSV file.",
+        nargs="?",
+        help=(
+            f"Path to the DraftKings projections CSV file. Omit it to use the "
+            f"newest {PROJECTIONS_GLOB} in Downloads."
+        ),
     )
     parser.add_argument(
         "-n",
@@ -1751,12 +1833,15 @@ def main() -> None:
         ownership_field = (
             OWNERSHIP_SMALL_FIELD if args.small_field else OWNERSHIP_LARGE_FIELD
         )
-        players_df = load_player_data(args.filepath, ownership_field)
+        projections_path = find_projections_file(args.filepath)
+        slate = detect_slate(projections_path)
+        print(f"Projections file: {projections_path} ({slate} Slate)")
+        players_df = load_player_data(projections_path, ownership_field)
         print(f"Optimizing on: {target_label}.")
         validate_target_data(players_df, target)
 
         if args.late_swap:
-            run_late_swap(args, players_df, target)
+            run_late_swap(args, players_df, target, slate=slate)
             return
 
         # Kickoffs only reorder the display slots (the latest one sits in
@@ -2010,7 +2095,7 @@ def main() -> None:
                 "DST",
             ]
 
-            print(f"\n--- Optimal NFL Lineup #{i + 1} ---")
+            print(f"\n--- Optimal NFL {slate} Slate Lineup #{i + 1} ---")
             total_ownership = lineup_df["Ownership"].sum()
             total_ceiling = lineup_df["Ceiling"].sum()
             # A blended run's score matches neither printed total, so show it;
@@ -2093,7 +2178,7 @@ def main() -> None:
             os.makedirs(EXPORT_DIR, exist_ok=True)
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             filename = (
-                f"nfl_classic_multi_lineups"
+                f"nfl_classic{SLATE_FILE_TAGS[slate]}_multi_lineups"
                 f"{TARGET_FILE_SUFFIXES[target]}_{timestamp}.csv"
             )
             filepath = os.path.join(EXPORT_DIR, filename)

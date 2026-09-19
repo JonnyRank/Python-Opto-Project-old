@@ -25,9 +25,25 @@ time zone late swap reads kickoffs in (Windows has no built-in zone database).
 
 ## Running
 
-Both scripts take the path to a projections CSV as the first argument.
+Both scripts find their projections CSV in your Downloads folder on their own, taking the newest
+match — re-downloads such as `... (1).csv` included:
+
+* Classic: `DraftKings NFL DFS Projections*.csv` — the Main, Early, and Late slate files all match.
+* Showdown: `DK NFL Showdown Projections*.csv`.
+
+To use a different file, pass its full path as the first argument (a file, not a folder). The
+file actually used is printed at the start of every run.
+
+**Slates (Classic).** The slate comes from the file name: `Early Slate` and `Late Slate` label
+every printed lineup (`--- Optimal NFL Early Slate Lineup #1 ---`) and the late-swap heading, and
+add `_early` / `_late` to the export name (`nfl_classic_early_multi_lineups_<timestamp>.csv`).
+`Main Slate`, or a file name with no slate in it, runs as Main and keeps the usual export name.
+Export contents are the same for every slate.
 
 ```bash
+# Newest Classic projections in Downloads, 20 lineups
+python NFL-Multi-Opto-v2.0.py -n 20 -u 2 -e
+
 # Single best Classic lineup
 python NFL-Multi-Opto-v2.0.py "C:\path\to\projections.csv" -n 1 -e
 
@@ -70,7 +86,7 @@ Without an entries file the FLEX goes to the cheapest player of that position, a
 
 | Flag | Meaning |
 | --- | --- |
-| `filepath` | Path to the projections CSV (required) |
+| `filepath` | Path to the projections CSV (optional; default: newest `DraftKings NFL DFS Projections*.csv` in Downloads) |
 | `-n`, `--num-lineups` | Number of lineups to generate (default: 1) |
 | `-u`, `--min-uniques` | Minimum players that must differ between any two lineups (default: 1) |
 | `-e`, `--export` | Write the lineups to a timestamped CSV |
@@ -93,7 +109,7 @@ prints a warning and is skipped rather than failing the run.
 
 | Flag | Meaning |
 | --- | --- |
-| `filepath` | Path to the Showdown projections CSV (required) |
+| `filepath` | Path to the Showdown projections CSV (optional; default: newest `DK NFL Showdown Projections*.csv` in Downloads) |
 | `-n`, `--num-lineups` | Number of lineups to generate (default: 1) |
 | `-u`, `--min-uniques` | Minimum roster spots that must differ between any two lineups (default: 1) |
 | `-e`, `--export` | Write the lineups to a timestamped CSV |
@@ -213,7 +229,8 @@ Expected columns: `Player`, `Pos`, `Team`, `Salary`, `Proj`, plus the optional
 
 `-e` writes a timestamped file (`nfl_classic_multi_lineups_<timestamp>.csv`,
 `nfl_showdown_multi_lineups_<timestamp>.csv`, with `_ceiling` / `_projceiling` inserted before
-the timestamp when one of those targets is used) to the directory set by the `EXPORT_DIR`
+the timestamp when one of those targets is used, and `_early` / `_late` after `nfl_classic` for
+an Early or Late slate) to the directory set by the `EXPORT_DIR`
 constant near the top of each script — currently `G:\My Drive\Documents\NFL-DFS\csv-exports`.
 Change that constant to export somewhere else.
 

@@ -266,7 +266,12 @@ def _newest_download(pattern: str, directory: Optional[str] = None) -> Optional[
     """
     directory = directory or DOWNLOADS_DIR
     # Escape the folder so a "[" in a Windows username is not read as a pattern.
-    matches = glob.glob(os.path.join(glob.escape(directory), pattern))
+    # glob also matches folders; only files are candidates.
+    matches = [
+        path
+        for path in glob.glob(os.path.join(glob.escape(directory), pattern))
+        if os.path.isfile(path)
+    ]
     if not matches:
         return None
     newest = max(matches, key=os.path.getmtime)
@@ -312,6 +317,37 @@ def find_projections_file(
             f"argument."
         )
     return path
+
+
+def reject_stray_projections_path(
+    filepath: Optional[str], *name_lists: Optional[List[str]]
+) -> None:
+    """
+    Stops a run whose projections path was typed after -l / -x.
+
+    Those flags take one or more values, so argparse files a path written
+    after them under the flag and leaves `filepath` empty. Left alone, the run
+    would skip the "player" and quietly optimize on the newest download.
+
+    Raises:
+        ValueError: If `filepath` is empty and a lock/exclude entry names a
+            CSV or an existing file.
+    """
+    if filepath:
+        return
+    for names in name_lists:
+        for name in names or []:
+            if name.lower().endswith(".csv") or os.path.isfile(name):
+                raise ValueError(
+                    f"'{name}' was read as a player name for -l/-x, but it looks "
+                    f"like a projections file. Put the projections path first, "
+                    f"before any flags."
+                )
+
+
+def describe_modified(path: str) -> str:
+    """Returns "modified Sat 09/19 11:20AM" for a file, so a stale download stands out."""
+    return f"modified {datetime.fromtimestamp(os.path.getmtime(path)):%a %m/%d %I:%M%p}"
 
 
 def find_dk_entries_file(
@@ -956,8 +992,9 @@ def main() -> None:
         target_label = OPTIMIZATION_TARGETS[target][0]
 
         # --- 2. Load and prepare data ---
+        reject_stray_projections_path(args.filepath, args.lock, args.exclude)
         projections_path = find_projections_file(args.filepath)
-        print(f"Projections file: {projections_path}")
+        print(f"Projections file: {projections_path} ({describe_modified(projections_path)})")
         players_df = load_player_data(projections_path)
         print(f"Optimizing on: {target_label}.")
         validate_target_data(players_df, target)

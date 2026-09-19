@@ -51,6 +51,14 @@ python NFL-Multi-Opto-v2.0.py "C:\path\to\projections.csv" -ls -u 2
 Lineups print to the terminal as a formatted table with total projection, ownership, ceiling,
 and salary. Nothing is written to disk unless you pass `-e`.
 
+**FLEX seating (Classic).** When a `DKEntries*.csv` is in your Downloads folder (the newest one
+wins), the Classic optimizer reads each player's kickoff from its `Game Info` column, matched by
+player ID, and seats the player with the latest kickoff in the FLEX — the lineup itself is
+unchanged, only who sits where. The position counts still decide which position fills the FLEX
+(a third RB means an RB sits there); among that position the latest game takes it. The printed
+table gains a `Kickoff` column (`4:25PM`), and the export and its upload row follow the same
+seating. Without an entries file the FLEX goes to the cheapest player of that position, as before.
+
 ## Options
 
 ### `NFL-Multi-Opto-v2.0.py` (Classic, multi-lineup)

@@ -63,6 +63,18 @@ Key Features:
 - Enforces constraints for salary cap, roster composition (QB, RB, WR, TE, FLEX, DST),
   and lineup diversity.
 - Prints a well-formatted, human-readable optimal lineup.
+- Seats the latest-kickoff player in FLEX, using the Game Info times in the
+  newest DKEntries*.csv in Downloads (skipped when there is none).
+
+FLEX Seating:
+    The solver picks nine players; which one prints as FLEX is decided
+    afterward. The position counts fix which position supplies the FLEX (a
+    third RB means an RB sits there), and within that position the player
+    whose game kicks off latest takes the FLEX, keeping the most late-swap
+    options open. Kickoffs come from the Game Info column of the newest
+    DKEntries*.csv in Downloads, matched by player ID, and print in a Kickoff
+    column. With no entries file the FLEX falls back to the cheapest player of
+    that position. The export CSV and its upload row follow the same seating.
 """
 
 import os
@@ -763,12 +775,25 @@ def load_player_data(
     return df
 
 
+def _kickoff_timestamp(kickoff: Any) -> float:
+    """Sort key for a kickoff; a missing one (unmatched, already started) sorts first."""
+    return kickoff.timestamp() if pd.notna(kickoff) else float("-inf")
+
+
+def _format_kickoff(kickoff: Any) -> str:
+    """Prints a kickoff as its Eastern clock time ("4:25PM"), or "-" when unknown."""
+    return f"{kickoff:%I:%M%p}".lstrip("0") if pd.notna(kickoff) else "-"
+
+
 def _assign_flex_positions(lineup: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
     """
     Assigns players from an optimal lineup to specific roster slots.
     This helper function fills the primary RB, WR, and TE slots first, sorted
     by salary descending. The single remaining FLEX-eligible player is then
-    placed in the FLEX slot.
+    placed in the FLEX slot. When the lineup carries a "Kickoff" column, the
+    FLEX is the latest kickoff among the position that supplies it; the
+    position counts fix which position that is, so a lineup with a third RB
+    always has an RB in the FLEX.
 
     Args:
         lineup: A DataFrame of the 9 players in the optimal lineup.
@@ -791,6 +816,16 @@ def _assign_flex_positions(lineup: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
         positional_players = unassigned_players[
             unassigned_players["Position"] == pos
         ].sort_values(by="Salary", ascending=False)
+
+        # The position with a surplus supplies the FLEX. Hold back its latest
+        # kickoff for that slot -- a FLEX can be swapped for any RB/WR/TE, so
+        # the latest-locking player keeps the most late-swap options open. On
+        # a tie, or with no kickoff times at all, the last (cheapest) player
+        # is held back, which is the salary order this function always used.
+        if len(positional_players) > count and "Kickoff" in positional_players:
+            order = [_kickoff_timestamp(k) for k in positional_players["Kickoff"]]
+            flex_pos = max(range(len(order)), key=lambda k: (order[k], k))
+            positional_players = positional_players.drop(positional_players.index[flex_pos])
 
         # Assign the top 'count' players to the primary slots
         players_to_assign_to_slots = positional_players.head(count)
@@ -888,6 +923,54 @@ def parse_kickoff(game_info: str, zone: tzinfo) -> Optional[datetime]:
         return datetime.strptime(match.group(1), KICKOFF_FORMAT).replace(tzinfo=zone)
     except ValueError:
         return None
+
+
+def load_dk_kickoffs(directory: Optional[str] = None) -> Dict[int, datetime]:
+    """
+    Maps DraftKings player IDs to kickoffs, for seating the latest one in FLEX.
+
+    Reads the player pool of the newest DKEntries*.csv in Downloads -- the file
+    late swap uses. Unlike late swap, a lineup build does not need it, so every
+    failure (no file, unreadable file, no Eastern zone) prints a note and
+    returns an empty dict, which leaves the FLEX in its salary order. A player
+    whose Game Info shows no start time ("In Progress") is left out and so
+    sorts as the earliest kickoff.
+    """
+    skipped = "the FLEX is not reordered by kickoff."
+    try:
+        path = find_dk_entries_file(directory)
+    except FileNotFoundError:
+        print(f"\nNOTE: No {DK_ENTRIES_GLOB} file in {directory or DOWNLOADS_DIR}; {skipped}")
+        return {}
+    filename = os.path.basename(path)
+    try:
+        zone = _game_info_timezone()
+        with open(path, newline="", encoding="utf-8-sig") as handle:
+            rows = list(csv.reader(handle))
+    except (OSError, ValueError) as exc:
+        print(f"\nNOTE: Could not read kickoffs from {filename} ({exc}); {skipped}")
+        return {}
+
+    header_idx = next((idx for idx, cells in enumerate(rows) if "Name + ID" in cells), None)
+    header = rows[header_idx] if header_idx is not None else []
+    if "ID" not in header or "Game Info" not in header:
+        print(f"\nNOTE: {filename} has no player pool with ID and Game Info; {skipped}")
+        return {}
+    id_col, info_col = header.index("ID"), header.index("Game Info")
+
+    kickoffs: Dict[int, datetime] = {}
+    for cells in rows[header_idx + 1 :]:
+        if len(cells) <= max(id_col, info_col):
+            continue
+        try:
+            dk_id = int(cells[id_col].strip())
+        except ValueError:
+            continue
+        kickoff = parse_kickoff(cells[info_col], zone)
+        if kickoff is not None:
+            kickoffs[dk_id] = kickoff
+    print(f"\nKickoff times read from {filename}.")
+    return kickoffs
 
 
 def load_dk_entries_file(
@@ -1628,6 +1711,19 @@ def main() -> None:
             run_late_swap(args, players_df, target)
             return
 
+        # Kickoffs only reorder the display slots (the latest one sits in
+        # FLEX); they never touch the model. Matched by DraftKings ID, so a
+        # stale entries file from another slate simply matches no one.
+        kickoffs = load_dk_kickoffs()
+        players_df["Kickoff"] = players_df["ID"].map(kickoffs)
+        show_kickoff = bool(players_df["Kickoff"].notna().any())
+        if kickoffs:
+            print(
+                f"Kickoffs matched for {int(players_df['Kickoff'].notna().sum())} "
+                f"of {len(players_df)} projected players."
+            )
+        table_rule = "-" * (99 if show_kickoff else 90)
+
         players_dict = players_df.to_dict("index")
         player_indices = list(players_dict.keys())
         unique_game_ids = list(players_df["game_id"].unique())
@@ -1880,12 +1976,13 @@ def main() -> None:
             print(f"Ownership: {total_ownership:.2f}%")
             print(f"Ceiling: {total_ceiling:.2f}")
             print(f"Salary: ${salary:,}")
-            print("-" * 90)
+            print(table_rule)
             print(
                 f"{'Slot':<5} {'Player':<25} {'Pos':<5} {'Team':<5} "
                 f"{'Salary':>8} {'Proj':>8} {'Own%':>8} {'Ceiling':>8}"
+                + (f" {'Kickoff':>8}" if show_kickoff else "")
             )
-            print("-" * 90)
+            print(table_rule)
 
             for slot in display_order:
                 player = assigned_lineup.get(slot)
@@ -1897,11 +1994,12 @@ def main() -> None:
                         f"{player['Team']:<5} ${int(player['Salary']):>7,} "
                         f"{player['Projection']:>8.2f} {player['Ownership']:>7.2f}% "
                         f"{player['Ceiling']:>8.2f}"
+                        + (f" {_format_kickoff(player['Kickoff']):>8}" if show_kickoff else "")
                     )
                 else:
                     print(f"{slot:<5} - ERROR ASSIGNING PLAYER -")
 
-            print("-" * 90)
+            print(table_rule)
 
             # Collect data for export if requested
             if args.export:

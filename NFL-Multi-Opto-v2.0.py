@@ -947,7 +947,7 @@ def load_dk_kickoffs(directory: Optional[str] = None) -> Dict[int, datetime]:
         zone = _game_info_timezone()
         with open(path, newline="", encoding="utf-8-sig") as handle:
             rows = list(csv.reader(handle))
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, csv.Error) as exc:
         print(f"\nNOTE: Could not read kickoffs from {filename} ({exc}); {skipped}")
         return {}
 
@@ -969,7 +969,10 @@ def load_dk_kickoffs(directory: Optional[str] = None) -> Dict[int, datetime]:
         kickoff = parse_kickoff(cells[info_col], zone)
         if kickoff is not None:
             kickoffs[dk_id] = kickoff
-    print(f"\nKickoff times read from {filename}.")
+    if kickoffs:
+        print(f"\nKickoff times read from {filename} ({len(kickoffs)} players).")
+    else:
+        print(f"\nNOTE: {filename} lists no readable kickoff times; {skipped}")
     return kickoffs
 
 

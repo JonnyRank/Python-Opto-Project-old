@@ -18,12 +18,19 @@ The script is run from the command line, specifying the path to the
 projections CSV file as an argument.
 
 Input Arguments:
-    python NFL-SD-Multi-Opto-v1.0.py "path" -n -u -e -l -x -ms -c -pj
-    python <script> <proj file> <# of lineups> <min uniques> <export to CSV> <lock players> <exclude players> <max salary> <optimize on ceiling> <optimize on 50/50 proj+ceiling>
+    python NFL-SD-Multi-Opto-v1.0.py "path" -n -u -e -l -x -ms -c -pj -dk
+    python <script> <proj file> <# of lineups> <min uniques> <export to CSV> <lock players> <exclude players> <max salary> <optimize on ceiling> <optimize on 50/50 proj+ceiling> <DKEntries file path>
     # Means: python <script> <projections file> -n <number of lineups> -u <min uniques> -e <export to CSV>
     python NFL-SD-Multi-Opto-v1.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -e -l "Drake Maye:CPT" -ms 49800
     python NFL-SD-Multi-Opto-v1.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -c
     python NFL-SD-Multi-Opto-v1.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -pj
+    python NFL-SD-Multi-Opto-v1.0.py "C:\\path\\to\\projections.csv" -n 5 -e -dk "C:\\path\\to\\DKEntries.csv"
+
+DraftKings Entries File (-dk / --dk-entries):
+    With -e, each lineup's export ends with an upload row of DraftKings
+    "Name + ID" values read from the newest DKEntries*.csv in your Downloads
+    folder; -dk names another file, and a -dk path that does not exist stops
+    the run. No entries file just drops the upload rows.
 
 Optimization Targets:
     (default)               Maximize total projection.
@@ -53,6 +60,7 @@ Key Features:
 import os
 import re
 import csv
+import glob
 import argparse
 import traceback
 from datetime import datetime
@@ -116,11 +124,12 @@ TARGET_FILE_SUFFIXES: Dict[str, str] = {
 }
 
 # DraftKings entries file used to translate rostered players into the
-# "Name + ID" values DraftKings expects when a lineup is uploaded.
-DK_ENTRIES_PATH: str = r"C:\Users\jrank\Downloads\DKEntries.csv"
-# The entries file is jagged: contest entries come first and the player pool
-# section (its own header, then one row per player per slot) starts here.
-DK_POOL_START_ROW: int = 8
+# "Name + ID" values DraftKings expects when a lineup is uploaded. -dk /
+# --dk-entries names one explicitly; otherwise the newest match in the current
+# user's Downloads folder wins, so a browser re-download ("DKEntries (1).csv")
+# is picked up.
+DOWNLOADS_DIR: str = os.path.join(os.path.expanduser("~"), "Downloads")
+DK_ENTRIES_GLOB: str = "DKEntries*.csv"
 # Name suffixes dropped when a projections name and a DraftKings name disagree.
 NAME_SUFFIXES: Tuple[str, ...] = ("jr", "sr", "ii", "iii", "iv", "v")
 
@@ -241,61 +250,113 @@ def _strip_name_suffix(normalized: str) -> str:
     return " ".join(parts)
 
 
-def load_dk_name_ids(path: str = DK_ENTRIES_PATH) -> Optional[Dict[str, Dict[str, Any]]]:
+def find_dk_entries_file(
+    override: Optional[str] = None, directory: Optional[str] = None
+) -> Optional[str]:
+    """
+    Picks the DraftKings entries file this run reads.
+
+    Args:
+        override: The -dk / --dk-entries path, used as given when supplied.
+        directory: Folder searched otherwise; defaults to DOWNLOADS_DIR.
+
+    Returns:
+        `override`, else the newest DK_ENTRIES_GLOB match in the folder, else
+        None when the folder holds no entries file.
+
+    Raises:
+        FileNotFoundError: If `override` names no file. An explicit path is
+            never silently swapped for another or skipped.
+    """
+    if override:
+        if not os.path.isfile(override):
+            raise FileNotFoundError(f"DraftKings entries file not found: {override}")
+        return override
+    directory = directory or DOWNLOADS_DIR
+    # Escape the folder so a "[" in a Windows username is not read as a pattern.
+    matches = glob.glob(os.path.join(glob.escape(directory), DK_ENTRIES_GLOB))
+    if not matches:
+        return None
+    newest = max(matches, key=os.path.getmtime)
+    if len(matches) > 1:
+        print(
+            f"  NOTE: {len(matches)} entries files in {directory}; using the "
+            f"newest, {os.path.basename(newest)}."
+        )
+    return newest
+
+
+def _find_dk_pool(
+    rows: List[List[str]],
+) -> Optional[Tuple[Dict[str, int], List[List[str]]]]:
+    """
+    Locates the player pool section of a DraftKings entries file.
+
+    The file is jagged: contest entries fill the leading columns and the pool
+    sits to their right under its own "Name + ID" header, a few rows down. The
+    whole file is scanned for that header, so a shifted instructions block
+    cannot hide it. Column positions are read from the full row -- the
+    entry-list columns to the pool's left never carry a pool header name -- so
+    pool rows need no slicing.
+
+    Returns:
+        (header name -> column index, the rows below the header), or None when
+        the file has no pool header. A repeated header name maps to its first
+        column.
+    """
+    for idx, cells in enumerate(rows):
+        if "Name + ID" in cells:
+            columns: Dict[str, int] = {}
+            for col, name in enumerate(cells):
+                if name.strip():
+                    columns.setdefault(name.strip(), col)
+            return columns, rows[idx + 1 :]
+    return None
+
+
+def load_dk_name_ids(path: Optional[str]) -> Optional[Dict[str, Dict[str, Any]]]:
     """
     Indexes every player's DraftKings "Name + ID" value from the entries file.
 
-    The file is jagged: contest entries occupy the leading columns and the
-    player pool section starts at DK_POOL_START_ROW with its own header. Each
-    player appears once per roster slot, so the Captain and FLEX versions of a
-    player carry different IDs and must be looked up by slot.
+    Each player appears once per roster slot, so the Captain and FLEX versions
+    of a Showdown player carry different IDs and must be looked up by slot.
 
     Args:
-        path: Location of the DraftKings entries CSV.
+        path: Location of the DraftKings entries CSV (see find_dk_entries_file).
 
     Returns:
         A dict with "by_slot" (slot + name keys), "by_name" (name keys, with
         ambiguous names mapped to None), and "by_team" (slot + team keys, used
         for DST rows whose names differ between the two files). Returns None
-        when the file is missing or carries no readable player pool, which
+        when there is no file or it carries no readable player pool, which
         tells the caller to omit the DraftKings upload rows entirely.
     """
-    if not os.path.exists(path):
+    if not path or not os.path.exists(path):
         return None
 
     try:
         with open(path, newline="", encoding="utf-8-sig") as handle:
             rows = list(csv.reader(handle))
-    except OSError:
+    except (OSError, csv.Error):
         return None
 
-    # Find the pool header, starting at the documented row and scanning on in
-    # case a future export shifts the instructions block by a line or two.
-    # The pool's columns are read from the full row: the entry-list columns to
-    # its left are blank on every pool row, so no slicing is needed.
-    header_idx = None
-    for idx in range(max(DK_POOL_START_ROW - 1, 0), len(rows)):
-        if "Name + ID" in rows[idx]:
-            header_idx = idx
-            break
-    if header_idx is None:
+    pool = _find_dk_pool(rows)
+    if pool is None:
         return None
-
-    header = rows[header_idx]
-    try:
-        name_id_col = header.index("Name + ID")
-        name_col = header.index("Name")
-        slot_col = header.index("Roster Position")
-    except ValueError:
+    columns, pool_rows = pool
+    if not {"Name + ID", "Name", "Roster Position"} <= columns.keys():
         return None
-    team_col = header.index("TeamAbbrev") if "TeamAbbrev" in header else None
-    position_col = header.index("Position") if "Position" in header else None
+    name_id_col = columns["Name + ID"]
+    name_col = columns["Name"]
+    slot_col = columns["Roster Position"]
+    team_col = columns.get("TeamAbbrev")
+    position_col = columns.get("Position")
 
     by_slot: Dict[str, str] = {}
     by_name: Dict[str, Optional[str]] = {}
     by_team: Dict[str, str] = {}
 
-    for cells in rows[header_idx + 1 :]:
+    for cells in pool_rows:
         if len(cells) <= max(name_id_col, name_col, slot_col):
             continue
         name_id = cells[name_id_col].strip()
@@ -806,6 +867,15 @@ def main() -> None:
         action="store_true",
         help="Optimize on an equally weighted 50/50 blend of projection and ceiling.",
     )
+    parser.add_argument(
+        "-dk",
+        "--dk-entries",
+        metavar="PATH",
+        help=(
+            f"DraftKings entries CSV for the export's upload rows, instead of "
+            f"the newest {DK_ENTRIES_GLOB} in Downloads."
+        ),
+    )
     args = parser.parse_args()
 
     try:
@@ -976,10 +1046,12 @@ def main() -> None:
 
         # DraftKings "Name + ID" values for the upload row that follows each
         # lineup's totals. Absent or unreadable entries file: no upload rows.
-        dk_lookup = load_dk_name_ids() if args.export else None
+        entries_path = find_dk_entries_file(args.dk_entries) if args.export else None
+        dk_lookup = load_dk_name_ids(entries_path) if args.export else None
         if args.export and dk_lookup is None:
             print(
-                f"\nNOTE: No readable DraftKings entries file at {DK_ENTRIES_PATH}. "
+                f"\nNOTE: No readable DraftKings entries file "
+                f"({entries_path or f'no {DK_ENTRIES_GLOB} in {DOWNLOADS_DIR}'}). "
                 f"The export will omit the upload rows."
             )
 

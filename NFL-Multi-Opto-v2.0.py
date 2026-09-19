@@ -10,15 +10,22 @@ The script is run from the command line, specifying the path to the
 projections CSV file as an argument.
 
 Input Arguments:
-    python NFL-Multi-Opto-v2.0.py "path" -n -u -e -te -x -l -s -srb -ndo -c -pj -sf -ls
-    python <script> <proj file> <# of lineups> <min uniques> <max TE> <exclude> <export to CSV> <lock players> <stack QB with WR/TE> <stack QB with RB> <no DST vs Opp> <optimize on ceiling> <optimize on 50/50 proj+ceiling> <use small-field ownership> <late swap DKEntries.csv>
+    python NFL-Multi-Opto-v2.0.py "path" -n -u -e -te -x -l -s -srb -ndo -c -pj -sf -ls -dk
+    python <script> <proj file> <# of lineups> <min uniques> <max TE> <exclude> <export to CSV> <lock players> <stack QB with WR/TE> <stack QB with RB> <no DST vs Opp> <optimize on ceiling> <optimize on 50/50 proj+ceiling> <use small-field ownership> <late swap DKEntries.csv> <DKEntries file path>
     python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -e -l "Josh Allen" -s -ndo
     python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -c
     python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -pj
     python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -ls -u 2
+    python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -n 5 -e -dk "C:\\path\\to\\DKEntries.csv"
+
+DraftKings Entries File (-dk / --dk-entries):
+    One entries file serves the whole run: the export's upload row, the
+    kickoffs that seat the FLEX, and the entries late swap rebuilds. By default
+    it is the newest DKEntries*.csv in your Downloads folder; -dk names another,
+    and a -dk path that does not exist stops the run.
 
 Late Swap (-ls / --late-swap):
-    Reads the newest DKEntries*.csv in your Downloads folder and re-optimizes
+    Reads the DraftKings entries file (see -dk above) and re-optimizes
     every entry in it. A player whose game has started -- judged from Game
     Info against the clock at runtime, or DraftKings' own LOCKED tag -- stays
     in his slot. Every other slot, including unstarted players already in the
@@ -63,6 +70,19 @@ Key Features:
 - Enforces constraints for salary cap, roster composition (QB, RB, WR, TE, FLEX, DST),
   and lineup diversity.
 - Prints a well-formatted, human-readable optimal lineup.
+- Seats the latest-kickoff player in FLEX, using the Game Info times in the
+  DraftKings entries file (skipped when there is none).
+
+FLEX Seating:
+    The solver picks nine players; which one prints as FLEX is decided
+    afterward. The position counts fix which position supplies the FLEX (a
+    third RB means an RB sits there), and within that position the player
+    whose game kicks off latest takes the FLEX, keeping the most late-swap
+    options open. Kickoffs come from the Game Info column of the entries file,
+    matched by player ID, and print in a "Kickoff (ET)" column. A player whose
+    game shows "In Progress" has no kickoff, prints "-", and counts as the
+    earliest. With no entries file the FLEX falls back to the cheapest player
+    of that position. The export CSV and its upload row follow the same seating.
 """
 
 import os
@@ -108,12 +128,14 @@ TARGET_FILE_SUFFIXES: Dict[str, str] = {
 
 EXPORT_DIR: str = r"G:\My Drive\Documents\NFL-DFS\csv-exports"
 
-# DraftKings entries file used to translate rostered players into the
-# "Name + ID" values DraftKings expects when a lineup is uploaded.
-DK_ENTRIES_PATH: str = r"C:\Users\jrank\Downloads\DKEntries.csv"
-# The entries file is jagged: contest entries come first and the player pool
-# section (its own header, then one row per player) starts here.
-DK_POOL_START_ROW: int = 8
+# DraftKings entries file: it supplies the "Name + ID" values of the export's
+# upload row, the kickoffs that seat the FLEX, and the entries late swap
+# rebuilds. -dk / --dk-entries names one explicitly; otherwise the newest
+# match in the current user's Downloads folder wins, so a browser re-download
+# ("DKEntries (1).csv") is picked up. Files that merely contain the name
+# ("SD-DKEntries.csv", "upload-ready-DKEntries-...") do not match.
+DOWNLOADS_DIR: str = os.path.join(os.path.expanduser("~"), "Downloads")
+DK_ENTRIES_GLOB: str = "DKEntries*.csv"
 # Name suffixes dropped when a projections name and a DraftKings name disagree.
 NAME_SUFFIXES: Tuple[str, ...] = ("jr", "sr", "ii", "iii", "iv", "v")
 
@@ -135,13 +157,8 @@ EXPORT_COLUMNS: List[str] = [
 
 # --- Late Swap ---
 # -ls / --late-swap re-optimizes the entries in a DraftKings entries file
-# mid-slate. The file is found in the current user's Downloads folder and the
-# finished lineups go back there in DraftKings' own upload layout.
-DOWNLOADS_DIR: str = os.path.join(os.path.expanduser("~"), "Downloads")
-# The newest match wins, so a browser re-download ("DKEntries (1).csv") is
-# picked up. Files that merely contain the name ("SD-DKEntries.csv",
-# "upload-ready-DKEntries-...") do not match.
-DK_ENTRIES_GLOB: str = "DKEntries*.csv"
+# mid-slate. The finished lineups go to the Downloads folder in DraftKings' own
+# upload layout.
 UPLOAD_FILE_PREFIX: str = "upload-ready-DKEntries"
 # Game Info reads "GB@MIN 09/13/2026 04:25PM ET" before kickoff and
 # "In Progress" after it. Kickoffs are Eastern wherever the script runs, so the
@@ -320,61 +337,113 @@ def _strip_name_suffix(normalized: str) -> str:
     return " ".join(parts)
 
 
-def load_dk_name_ids(path: str = DK_ENTRIES_PATH) -> Optional[Dict[str, Dict[str, Any]]]:
+def find_dk_entries_file(
+    override: Optional[str] = None, directory: Optional[str] = None
+) -> Optional[str]:
+    """
+    Picks the DraftKings entries file this run reads.
+
+    Args:
+        override: The -dk / --dk-entries path, used as given when supplied.
+        directory: Folder searched otherwise; defaults to DOWNLOADS_DIR.
+
+    Returns:
+        `override`, else the newest DK_ENTRIES_GLOB match in the folder, else
+        None when the folder holds no entries file.
+
+    Raises:
+        FileNotFoundError: If `override` names no file. An explicit path is
+            never silently swapped for another or skipped.
+    """
+    if override:
+        if not os.path.isfile(override):
+            raise FileNotFoundError(f"DraftKings entries file not found: {override}")
+        return override
+    directory = directory or DOWNLOADS_DIR
+    # Escape the folder so a "[" in a Windows username is not read as a pattern.
+    matches = glob.glob(os.path.join(glob.escape(directory), DK_ENTRIES_GLOB))
+    if not matches:
+        return None
+    newest = max(matches, key=os.path.getmtime)
+    if len(matches) > 1:
+        print(
+            f"  NOTE: {len(matches)} entries files in {directory}; using the "
+            f"newest, {os.path.basename(newest)}."
+        )
+    return newest
+
+
+def _find_dk_pool(
+    rows: List[List[str]],
+) -> Optional[Tuple[Dict[str, int], List[List[str]]]]:
+    """
+    Locates the player pool section of a DraftKings entries file.
+
+    The file is jagged: contest entries fill the leading columns and the pool
+    sits to their right under its own "Name + ID" header, a few rows down. The
+    whole file is scanned for that header, so a shifted instructions block
+    cannot hide it. Column positions are read from the full row -- the
+    entry-list columns to the pool's left never carry a pool header name -- so
+    pool rows need no slicing.
+
+    Returns:
+        (header name -> column index, the rows below the header), or None when
+        the file has no pool header. A repeated header name maps to its first
+        column.
+    """
+    for idx, cells in enumerate(rows):
+        if "Name + ID" in cells:
+            columns: Dict[str, int] = {}
+            for col, name in enumerate(cells):
+                if name.strip():
+                    columns.setdefault(name.strip(), col)
+            return columns, rows[idx + 1 :]
+    return None
+
+
+def load_dk_name_ids(path: Optional[str]) -> Optional[Dict[str, Dict[str, Any]]]:
     """
     Indexes every player's DraftKings "Name + ID" value from the entries file.
 
-    The file is jagged: contest entries occupy the leading columns and the
-    player pool section starts at DK_POOL_START_ROW with its own header. Each
-    player appears once per roster slot, so the Captain and FLEX versions of a
-    player carry different IDs and must be looked up by slot.
+    Each player appears once per roster slot, so the Captain and FLEX versions
+    of a Showdown player carry different IDs and must be looked up by slot.
 
     Args:
-        path: Location of the DraftKings entries CSV.
+        path: Location of the DraftKings entries CSV (see find_dk_entries_file).
 
     Returns:
         A dict with "by_slot" (slot + name keys), "by_name" (name keys, with
         ambiguous names mapped to None), and "by_team" (slot + team keys, used
         for DST rows whose names differ between the two files). Returns None
-        when the file is missing or carries no readable player pool, which
+        when there is no file or it carries no readable player pool, which
         tells the caller to omit the DraftKings upload rows entirely.
     """
-    if not os.path.exists(path):
+    if not path or not os.path.exists(path):
         return None
 
     try:
         with open(path, newline="", encoding="utf-8-sig") as handle:
             rows = list(csv.reader(handle))
-    except OSError:
+    except (OSError, csv.Error):
         return None
 
-    # Find the pool header, starting at the documented row and scanning on in
-    # case a future export shifts the instructions block by a line or two.
-    # The pool's columns are read from the full row: the entry-list columns to
-    # its left are blank on every pool row, so no slicing is needed.
-    header_idx = None
-    for idx in range(max(DK_POOL_START_ROW - 1, 0), len(rows)):
-        if "Name + ID" in rows[idx]:
-            header_idx = idx
-            break
-    if header_idx is None:
+    pool = _find_dk_pool(rows)
+    if pool is None:
         return None
-
-    header = rows[header_idx]
-    try:
-        name_id_col = header.index("Name + ID")
-        name_col = header.index("Name")
-        slot_col = header.index("Roster Position")
-    except ValueError:
+    columns, pool_rows = pool
+    if not {"Name + ID", "Name", "Roster Position"} <= columns.keys():
         return None
-    team_col = header.index("TeamAbbrev") if "TeamAbbrev" in header else None
-    position_col = header.index("Position") if "Position" in header else None
+    name_id_col = columns["Name + ID"]
+    name_col = columns["Name"]
+    slot_col = columns["Roster Position"]
+    team_col = columns.get("TeamAbbrev")
+    position_col = columns.get("Position")
 
     by_slot: Dict[str, str] = {}
     by_name: Dict[str, Optional[str]] = {}
     by_team: Dict[str, str] = {}
 
-    for cells in rows[header_idx + 1 :]:
+    for cells in pool_rows:
         if len(cells) <= max(name_id_col, name_col, slot_col):
             continue
         name_id = cells[name_id_col].strip()
@@ -763,12 +832,25 @@ def load_player_data(
     return df
 
 
+def _kickoff_timestamp(kickoff: Any) -> float:
+    """Sort key for a kickoff; a missing one (unmatched, already started) sorts first."""
+    return kickoff.timestamp() if pd.notna(kickoff) else float("-inf")
+
+
+def _format_kickoff(kickoff: Any) -> str:
+    """Prints a kickoff as its Eastern clock time ("4:25PM"), or "-" when unknown."""
+    return f"{kickoff:%I:%M%p}".lstrip("0") if pd.notna(kickoff) else "-"
+
+
 def _assign_flex_positions(lineup: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
     """
     Assigns players from an optimal lineup to specific roster slots.
     This helper function fills the primary RB, WR, and TE slots first, sorted
     by salary descending. The single remaining FLEX-eligible player is then
-    placed in the FLEX slot.
+    placed in the FLEX slot. When the lineup carries a "Kickoff" column, the
+    FLEX is the latest kickoff among the position that supplies it; the
+    position counts fix which position that is, so a lineup with a third RB
+    always has an RB in the FLEX.
 
     Args:
         lineup: A DataFrame of the 9 players in the optimal lineup.
@@ -791,6 +873,16 @@ def _assign_flex_positions(lineup: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
         positional_players = unassigned_players[
             unassigned_players["Position"] == pos
         ].sort_values(by="Salary", ascending=False)
+
+        # The position with a surplus supplies the FLEX. Hold back its latest
+        # kickoff for that slot -- a FLEX can be swapped for any RB/WR/TE, so
+        # the latest-locking player keeps the most late-swap options open. On
+        # a tie, or with no kickoff times at all, the last (cheapest) player
+        # is held back, which is the salary order this function always used.
+        if len(positional_players) > count and "Kickoff" in positional_players:
+            order = [_kickoff_timestamp(k) for k in positional_players["Kickoff"]]
+            flex_pos = max(range(len(order)), key=lambda k: (order[k], k))
+            positional_players = positional_players.drop(positional_players.index[flex_pos])
 
         # Assign the top 'count' players to the primary slots
         players_to_assign_to_slots = positional_players.head(count)
@@ -849,30 +941,6 @@ def _game_info_timezone() -> tzinfo:
         ) from exc
 
 
-def find_dk_entries_file(directory: Optional[str] = None) -> str:
-    """
-    Returns the newest DK_ENTRIES_GLOB match in the Downloads folder.
-
-    Raises:
-        FileNotFoundError: If the folder holds no entries file.
-    """
-    directory = directory or DOWNLOADS_DIR
-    # Escape the folder so a "[" in a Windows username is not read as a pattern.
-    matches = glob.glob(os.path.join(glob.escape(directory), DK_ENTRIES_GLOB))
-    if not matches:
-        raise FileNotFoundError(
-            f"No {DK_ENTRIES_GLOB} file found in {directory}. Download your "
-            f"entries CSV from DraftKings' Edit Entries page first."
-        )
-    newest = max(matches, key=os.path.getmtime)
-    if len(matches) > 1:
-        print(
-            f"  NOTE: {len(matches)} entries files in {directory}; using the "
-            f"newest, {os.path.basename(newest)}."
-        )
-    return newest
-
-
 def parse_kickoff(game_info: str, zone: tzinfo) -> Optional[datetime]:
     """
     Reads the kickoff out of a Game Info cell ("GB@MIN 09/13/2026 04:25PM ET").
@@ -888,6 +956,54 @@ def parse_kickoff(game_info: str, zone: tzinfo) -> Optional[datetime]:
         return datetime.strptime(match.group(1), KICKOFF_FORMAT).replace(tzinfo=zone)
     except ValueError:
         return None
+
+
+def load_dk_kickoffs(path: Optional[str]) -> Dict[int, datetime]:
+    """
+    Maps DraftKings player IDs to kickoffs, for seating the latest one in FLEX.
+
+    Reads the player pool of the entries file find_dk_entries_file() chose.
+    Unlike late swap, a lineup build does not need it, so every failure (no
+    file, unreadable file, no Eastern zone) prints a note and returns an empty
+    dict, which leaves the FLEX in its salary order. A player whose Game Info
+    shows no start time ("In Progress") is left out and so sorts as the
+    earliest kickoff.
+    """
+    skipped = "the FLEX is not reordered by kickoff."
+    if path is None:
+        print(f"\nNOTE: No {DK_ENTRIES_GLOB} file in {DOWNLOADS_DIR}; {skipped}")
+        return {}
+    filename = os.path.basename(path)
+    try:
+        zone = _game_info_timezone()
+        with open(path, newline="", encoding="utf-8-sig") as handle:
+            rows = list(csv.reader(handle))
+    except (OSError, ValueError, csv.Error) as exc:
+        print(f"\nNOTE: Could not read kickoffs from {filename} ({exc}); {skipped}")
+        return {}
+
+    columns, pool_rows = _find_dk_pool(rows) or ({}, [])
+    if "ID" not in columns or "Game Info" not in columns:
+        print(f"\nNOTE: {filename} has no player pool with ID and Game Info; {skipped}")
+        return {}
+    id_col, info_col = columns["ID"], columns["Game Info"]
+
+    kickoffs: Dict[int, datetime] = {}
+    for cells in pool_rows:
+        if len(cells) <= max(id_col, info_col):
+            continue
+        try:
+            dk_id = int(cells[id_col].strip())
+        except ValueError:
+            continue
+        kickoff = parse_kickoff(cells[info_col], zone)
+        if kickoff is not None:
+            kickoffs[dk_id] = kickoff
+    if kickoffs:
+        print(f"\nKickoff times read from {filename} ({len(kickoffs)} players).")
+    else:
+        print(f"\nNOTE: {filename} lists no readable kickoff times; {skipped}")
+    return kickoffs
 
 
 def load_dk_entries_file(
@@ -959,17 +1075,15 @@ def load_dk_entries_file(
     if not entries:
         raise ValueError(f"{filename} lists no contest entries.")
 
-    header_idx = next(
-        (idx for idx, cells in enumerate(rows) if "Name + ID" in cells), None
-    )
-    if header_idx is None:
+    found = _find_dk_pool(rows)
+    if found is None:
         raise ValueError(f"{filename} has no player pool section ('Name + ID' header).")
-    pool_header = rows[header_idx]
+    columns, pool_rows = found
     needed = ("Name + ID", "Name", "ID", "Roster Position", "Salary", "Game Info", "TeamAbbrev")
-    missing = [name for name in needed if name not in pool_header]
+    missing = [name for name in needed if name not in columns]
     if missing:
         raise ValueError(f"{filename}'s player pool is missing column(s): {', '.join(missing)}.")
-    col = {name: pool_header.index(name) for name in needed}
+    col = {name: columns[name] for name in needed}
 
     # Game Info times are Eastern whatever zone `now` arrives in; a naive
     # `now` is taken as Eastern too.
@@ -977,7 +1091,7 @@ def load_dk_entries_file(
     if now.tzinfo is None:
         now = now.replace(tzinfo=zone)
     pool: Dict[int, DkPoolPlayer] = {}
-    for cells in rows[header_idx + 1 :]:
+    for cells in pool_rows:
         if len(cells) <= max(col.values()):
             continue
         try:
@@ -1330,7 +1444,8 @@ def run_late_swap(
     now: Optional[datetime] = None,
 ) -> Optional[str]:
     """
-    Late-swaps every entry in the newest DraftKings entries file in Downloads.
+    Late-swaps every entry in the DraftKings entries file (-dk, else the
+    newest one in Downloads).
 
     Players whose games have started stay in their slots. Every other slot is
     re-optimized from the players whose games have not started, and each
@@ -1351,7 +1466,13 @@ def run_late_swap(
     zone = _game_info_timezone()
     now = now.astimezone(zone) if now else datetime.now(zone)
 
-    entries_path = find_dk_entries_file()
+    entries_path = find_dk_entries_file(args.dk_entries)
+    if entries_path is None:
+        raise FileNotFoundError(
+            f"No {DK_ENTRIES_GLOB} file found in {DOWNLOADS_DIR}. Download your "
+            f"entries CSV from DraftKings' Edit Entries page first, or name one "
+            f"with -dk."
+        )
     upload_header, slot_labels, entries, pool = load_dk_entries_file(entries_path, now)
     contests = {entry.contest_id for entry in entries}
     print("\n--- Late Swap ---")
@@ -1610,6 +1731,16 @@ def main() -> None:
             "to Downloads. -u applies within each contest; -n and -e are ignored."
         ),
     )
+    parser.add_argument(
+        "-dk",
+        "--dk-entries",
+        metavar="PATH",
+        help=(
+            f"DraftKings entries CSV to read instead of the newest "
+            f"{DK_ENTRIES_GLOB} in Downloads. It supplies the export's upload "
+            f"row, the kickoffs that seat the FLEX, and the entries -ls swaps."
+        ),
+    )
     args = parser.parse_args()
 
     try:
@@ -1627,6 +1758,20 @@ def main() -> None:
         if args.late_swap:
             run_late_swap(args, players_df, target)
             return
+
+        # Kickoffs only reorder the display slots (the latest one sits in
+        # FLEX); they never touch the model. Matched by DraftKings ID, so a
+        # stale entries file from another slate simply matches no one.
+        entries_path = find_dk_entries_file(args.dk_entries)
+        kickoffs = load_dk_kickoffs(entries_path)
+        players_df["Kickoff"] = players_df["ID"].map(kickoffs)
+        show_kickoff = bool(players_df["Kickoff"].notna().any())
+        if kickoffs:
+            print(
+                f"Kickoffs matched for {int(players_df['Kickoff'].notna().sum())} "
+                f"of {len(players_df)} projected players."
+            )
+        table_rule = "-" * (104 if show_kickoff else 90)
 
         players_dict = players_df.to_dict("index")
         player_indices = list(players_dict.keys())
@@ -1805,10 +1950,11 @@ def main() -> None:
 
         # DraftKings "Name + ID" values for the upload row that follows each
         # lineup's totals. Absent or unreadable entries file: no upload rows.
-        dk_lookup = load_dk_name_ids() if args.export else None
+        dk_lookup = load_dk_name_ids(entries_path) if args.export else None
         if args.export and dk_lookup is None:
             print(
-                f"\nNOTE: No readable DraftKings entries file at {DK_ENTRIES_PATH}. "
+                f"\nNOTE: No readable DraftKings entries file "
+                f"({entries_path or f'no {DK_ENTRIES_GLOB} in {DOWNLOADS_DIR}'}). "
                 f"The export will omit the upload rows."
             )
 
@@ -1880,12 +2026,13 @@ def main() -> None:
             print(f"Ownership: {total_ownership:.2f}%")
             print(f"Ceiling: {total_ceiling:.2f}")
             print(f"Salary: ${salary:,}")
-            print("-" * 90)
+            print(table_rule)
             print(
                 f"{'Slot':<5} {'Player':<25} {'Pos':<5} {'Team':<5} "
                 f"{'Salary':>8} {'Proj':>8} {'Own%':>8} {'Ceiling':>8}"
+                + (f"  {'Kickoff (ET)':>12}" if show_kickoff else "")
             )
-            print("-" * 90)
+            print(table_rule)
 
             for slot in display_order:
                 player = assigned_lineup.get(slot)
@@ -1897,11 +2044,12 @@ def main() -> None:
                         f"{player['Team']:<5} ${int(player['Salary']):>7,} "
                         f"{player['Projection']:>8.2f} {player['Ownership']:>7.2f}% "
                         f"{player['Ceiling']:>8.2f}"
+                        + (f"  {_format_kickoff(player['Kickoff']):>12}" if show_kickoff else "")
                     )
                 else:
                     print(f"{slot:<5} - ERROR ASSIGNING PLAYER -")
 
-            print("-" * 90)
+            print(table_rule)
 
             # Collect data for export if requested
             if args.export:

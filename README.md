@@ -46,18 +46,23 @@ python NFL-SD-Multi-Opto-v1.0.py "C:\path\to\showdown.csv" -n 20 -u 2 -pj -e
 
 # Late swap: re-optimize every entry in Downloads\DKEntries.csv around the games already started
 python NFL-Multi-Opto-v2.0.py "C:\path\to\projections.csv" -ls -u 2
+
+# Use a specific DraftKings entries file instead of the newest one in Downloads
+python NFL-Multi-Opto-v2.0.py "C:\path\to\projections.csv" -n 20 -e -dk "C:\path\to\DKEntries.csv"
 ```
 
 Lineups print to the terminal as a formatted table with total projection, ownership, ceiling,
 and salary. Nothing is written to disk unless you pass `-e`.
 
-**FLEX seating (Classic).** When a `DKEntries*.csv` is in your Downloads folder (the newest one
-wins), the Classic optimizer reads each player's kickoff from its `Game Info` column, matched by
+**FLEX seating (Classic).** When there is a DraftKings entries file (see
+[The upload row and DKEntries.csv](#the-upload-row-and-dkentriescsv)), the Classic optimizer reads each player's kickoff from its `Game Info` column, matched by
 player ID, and seats the player with the latest kickoff in the FLEX — the lineup itself is
 unchanged, only who sits where. The position counts still decide which position fills the FLEX
 (a third RB means an RB sits there); among that position the latest game takes it. The printed
-table gains a `Kickoff` column (`4:25PM`), and the export and its upload row follow the same
-seating. Without an entries file the FLEX goes to the cheapest player of that position, as before.
+table gains a `Kickoff (ET)` column (`4:25PM`), and the export and its upload row follow the same
+seating. A player whose game already shows `In Progress` has no kickoff: it prints `-` and counts
+as the earliest game, so it never takes the FLEX from a player with a kickoff still to come.
+Without an entries file the FLEX goes to the cheapest player of that position, as before.
 
 ## Options
 
@@ -79,6 +84,7 @@ seating. Without an entries file the FLEX goes to the cheapest player of that po
 | `-pj`, `--projceiling` | Optimize on a 50/50 blend of projection and ceiling |
 | `-sf`, `--small-field` | Show small-field ownership instead of large-field (display/export only) |
 | `-ls`, `--late-swap` | Late-swap your DraftKings entries instead of building new lineups — see [Late swap](#late-swap) |
+| `-dk`, `--dk-entries` | DraftKings entries CSV to use instead of the newest `DKEntries*.csv` in Downloads (upload row, FLEX kickoffs, late swap) |
 
 Name matching for `-l` and `-x` is case-insensitive. A name that isn't in the projections file
 prints a warning and is skipped rather than failing the run.
@@ -96,6 +102,7 @@ prints a warning and is skipped rather than failing the run.
 | `-ms`, `--max-salary` | Cap total lineup salary below $50,000 (values above the cap are clamped) |
 | `-c`, `--ceiling` | Optimize on ceiling instead of projection |
 | `-pj`, `--projceiling` | Optimize on a 50/50 blend of projection and ceiling |
+| `-dk`, `--dk-entries` | DraftKings entries CSV for the upload rows, instead of the newest `DKEntries*.csv` in Downloads |
 
 Showdown notes:
 
@@ -227,9 +234,11 @@ Each lineup is written as three blocks, all sharing a `Lineup_ID`:
 
 ### The upload row and DKEntries.csv
 
-The `Name + ID` values are read from `C:\Users\jrank\Downloads\DKEntries.csv` (the
-`DK_ENTRIES_PATH` constant). That file is jagged: contest entries come first and the player
-pool section starts at row 8 with its own header, listing `Position`, `Name + ID`, `Name`,
+The `Name + ID` values are read from the newest `DKEntries*.csv` in your Downloads folder, so a
+browser re-download such as `DKEntries (1).csv` is picked up automatically; `-dk` names a
+different file, and a `-dk` path that doesn't exist stops the run. The Classic optimizer uses
+the same file for FLEX kickoffs and late swap. That file is jagged: contest entries come first
+and the player pool section follows a few rows down with its own header, listing `Position`, `Name + ID`, `Name`,
 `ID`, `Roster Position`, `Salary`, `Game Info`, and `TeamAbbrev`.
 
 * Showdown players appear twice — once at `CPT` and once at `FLEX` — with **different IDs**,
@@ -251,7 +260,8 @@ python NFL-Multi-Opto-v2.0.py "C:\path\to\projections.csv" -ls -u 2
 ```
 
 * **Input** — the newest `DKEntries*.csv` in your Downloads folder, so a browser re-download
-  such as `DKEntries (1).csv` is picked up automatically. Classic entries files only.
+  such as `DKEntries (1).csv` is picked up automatically, or the file named with `-dk`.
+  Classic entries files only.
 * **Who is locked** — a player whose game has started, judged from the file's `Game Info`
   column against the clock when you run the script (kickoffs are Eastern). `In Progress`
   counts as started, and so does DraftKings' own `(LOCKED)` tag. A locked player stays in his

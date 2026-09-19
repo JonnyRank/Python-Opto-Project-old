@@ -297,7 +297,8 @@ python NFL-Multi-Opto-v2.0.py "C:\path\to\projections.csv" -ls -u 2
 * **Rules** — `-l`, `-x`, `-s`, `-srb`, `-te`, `-ndo`, `-c`, `-pj` and `-sf` apply to the new
   picks. `-n` and `-e` are ignored. An entry with no swap that fits the cap and your rules is
   written back unchanged, with a note.
-* **Output** — `upload-ready-DKEntries-<timestamp>.csv` in Downloads, holding every entry
+* **Output** — `upload-ready-DKEntries-<timestamp>.csv` in Downloads
+  (`upload-ready-DKEntries-early-<timestamp>.csv` / `-late-` for those slates), holding every entry
   (changed or not) in DraftKings' upload layout. Each cell is DraftKings' own `Name + ID`
   text, `(LOCKED)` tag included, ready to upload on the Edit Entries page.
 

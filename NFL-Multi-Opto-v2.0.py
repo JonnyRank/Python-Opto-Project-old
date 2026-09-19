@@ -42,7 +42,8 @@ Late Swap (-ls / --late-swap):
     in his slot. Every other slot, including unstarted players already in the
     lineup, is refilled from players whose games have not started. -u is
     enforced between entries of the same contest only. All entries are written
-    to Downloads\\upload-ready-DKEntries-<timestamp>.csv, each cell holding
+    to Downloads\\upload-ready-DKEntries-<timestamp>.csv (with "-early" or
+    "-late" before the timestamp for those slates), each cell holding
     DraftKings' own "Name + ID" text. -l, -x, -s, -srb, -te, -ndo, -c, -pj and
     -sf apply; -n and -e do not.
 
@@ -1564,8 +1565,9 @@ def run_late_swap(
     re-optimized from the players whose games have not started, and each
     entry must differ from the entries already built for the same contest by
     -u players. An entry with no valid swap is written back unchanged. The
-    result is an upload-ready-DKEntries-<timestamp>.csv in Downloads holding
-    every entry, each cell DraftKings' own "Name + ID" text.
+    result is an upload-ready-DKEntries-<timestamp>.csv in Downloads (with
+    "-early" / "-late" before the timestamp for those slates) holding every
+    entry, each cell DraftKings' own "Name + ID" text.
 
     Args:
         args: Parsed CLI options.
@@ -1729,8 +1731,13 @@ def run_late_swap(
         f"{unchanged_locked} fully locked, {failed} with no valid swap."
     )
 
+    # Early/Late slates are named in the file ("upload-ready-DKEntries-early-
+    # <timestamp>.csv") so two slates' uploads are told apart; Main is unchanged.
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    output_path = os.path.join(DOWNLOADS_DIR, f"{UPLOAD_FILE_PREFIX}-{timestamp}.csv")
+    name_parts = [UPLOAD_FILE_PREFIX, SLATE_FILE_TAGS[slate].lstrip("_"), timestamp]
+    output_path = os.path.join(
+        DOWNLOADS_DIR, "-".join(part for part in name_parts if part) + ".csv"
+    )
     with open(output_path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(upload_header)

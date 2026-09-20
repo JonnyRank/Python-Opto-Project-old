@@ -1,9 +1,9 @@
 """
 DraftKings NFL Multi-Lineup Optimizer.
 
-This script ingests a CSV file with player projections and uses linear
-programming to find a specified number of unique, optimal lineups that
-maximize a chosen scoring target (projection, ceiling, or a 50/50 mix of the
+This script ingests a CSV file with player projections and uses mixed integer
+linear programming (PuLP + HiGHS) to find a specified number of unique, optimal
+lineups that maximize a chosen scoring target (projection, ceiling, or a 50/50 mix of the
 two), subject to DraftKings' classic NFL contest rules.
 
 The script is run from the command line. It optimizes on the newest
@@ -77,7 +77,7 @@ Key Features:
 - Accepts either the legacy or the current projections headers.
 - Cleans and validates player salary, projection, and ownership data.
 - Identifies unique games to enforce the "at least two games" rule.
-- Uses the PuLP library to model and solve the optimization problem.
+- Uses the HiGHS solver (via highspy) through PuLP to solve each lineup.
 - Optimizes on projection, ceiling, or a 50/50 blend of the two.
 - Enforces constraints for salary cap, roster composition (QB, RB, WR, TE, FLEX, DST),
   and lineup diversity.
@@ -347,6 +347,28 @@ def validate_target_data(df: pd.DataFrame, target: str) -> None:
         f"  WARNING: {len(zeroed)} of {len(df)} players have a zero or missing "
         f"ceiling. Under the '{label}' target {consequence}: {names}"
     )
+
+
+def build_solver() -> pulp.LpSolver:
+    """
+    Returns the HiGHS solver every model in this script is solved with.
+
+    One instance serves the whole run: PuLP rebuilds the underlying HiGHS model
+    from the problem on each solve, so the same solver object is safe to reuse
+    both across the multi-lineup loop's accumulated cuts and across the
+    one-problem-per-entry models late swap builds.
+
+    Raises:
+        ValueError: If highspy is not installed, which is the only way HiGHS
+            can be unavailable. Checked once, before any solving, so the run
+            fails with an actionable message instead of a PuLP solver error.
+    """
+    solver = pulp.HiGHS(msg=False)
+    if not solver.available():
+        raise ValueError(
+            "The HiGHS solver is not available. Install it with: pip install highspy"
+        )
+    return solver
 
 
 def _normalize_name(name: Any) -> str:
@@ -1288,6 +1310,7 @@ def optimize_late_swap_entry(
     args: argparse.Namespace,
     lock_ids: Set[int],
     previous: List[FrozenSet[int]],
+    solver: pulp.LpSolver,
 ) -> Optional[List[int]]:
     """
     Picks the best players for one entry's open slots.
@@ -1313,6 +1336,7 @@ def optimize_late_swap_entry(
             min_uniques).
         lock_ids: IDs from -l; forced in wherever they fit an open slot.
         previous: Lineups already built for this contest, for -u.
+        solver: The HiGHS solver from build_solver(), shared by every entry.
 
     Returns:
         The chosen DraftKings IDs (one per open slot, unordered), or None when
@@ -1430,7 +1454,7 @@ def optimize_late_swap_entry(
             allowance = ROSTER_SIZE - args.min_uniques - len(locked_set & prev)
             prob += pulp.lpSum(pick[i] for i in shared) <= max(allowance, 0)
 
-    prob.solve(pulp.PULP_CBC_CMD(msg=0))
+    prob.solve(solver)
     if pulp.LpStatus[prob.status] != "Optimal":
         return None
     return [i for i in fits if pick[i].varValue > 0.5]
@@ -1582,6 +1606,10 @@ def run_late_swap(
     zone = _game_info_timezone()
     now = now.astimezone(zone) if now else datetime.now(zone)
 
+    # Checked before any file is read, so a missing highspy stops the run
+    # rather than surfacing once entries are already being rebuilt.
+    solver = build_solver()
+
     entries_path = find_dk_entries_file(args.dk_entries)
     if entries_path is None:
         raise FileNotFoundError(
@@ -1678,7 +1706,7 @@ def run_late_swap(
             for relaxed, prev in enumerate([previous, []] if previous else [[]]):
                 picks = optimize_late_swap_entry(
                     open_labels, locked_ids, pool, candidates, projections,
-                    target, args, lock_ids, prev,
+                    target, args, lock_ids, prev, solver,
                 )
                 if picks is None:
                     continue
@@ -2076,6 +2104,7 @@ def main() -> None:
             )
 
         # --- 4. Iterative Optimization Loop ---
+        solver = build_solver()
         generated_lineups_indices = []
         max_players_can_share = ROSTER_SIZE - args.min_uniques
         all_lineups_export_data = []
@@ -2094,7 +2123,7 @@ def main() -> None:
             print(f"\n--- Generating Lineup #{i + 1} ---")
 
             # Solve the problem
-            prob.solve(pulp.PULP_CBC_CMD(msg=0))
+            prob.solve(solver)
             status = pulp.LpStatus[prob.status]
 
             if status != "Optimal":

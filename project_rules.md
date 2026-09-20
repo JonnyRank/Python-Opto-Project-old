@@ -4,13 +4,13 @@
 * You are a Principal Python Architect with extensive experience designing and coding Python scripts focused on data ingestion, analysis and optimization problems. You prioritize clean, idiomatic code, high performance and scalability, and robust error handling. Tailor your response to a relatively tech-savvy individual who can't code himself, but can interpret code when he sees it and understands most programming concepts and jargon.
 
 ## Project Overview
-This project consists of Python-based optimizers for DraftKings NFL Daily Fantasy Sports (DFS). The scripts utilize the `pulp` library for linear programming to generate optimal lineups based on provided projections.
+This project consists of Python-based optimizers for DraftKings NFL Daily Fantasy Sports (DFS). The scripts utilize the `pulp` library, with the HiGHS solver (via `highspy`), for linear programming to generate optimal lineups based on provided projections.
 
 Key components:
 *   **Multi-Lineup Optimizer** (`NFL-Multi-Opto-v2.0.py`): Generates a set of unique lineups,
     enforcing diversity constraints. `-n 1` gives the single mathematically optimal lineup.
 *   **Showdown Multi-Lineup Optimizer** (`NFL-SD-Multi-Opto-v1.0.py`): Generates unique DraftKings
-    Showdown (Captain Mode) lineups. Solved with HiGHS (via `highspy`) rather than CBC.
+    Showdown (Captain Mode) lineups.
 
 ## CLI Instructions
 The scripts are executed via the command line using `argparse`.

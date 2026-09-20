@@ -12,7 +12,7 @@ Standalone DraftKings DFS lineup optimizers. Each `.py` file at the repo root is
 
 | Script | Sport / format | Roster | Solver | Input |
 | --- | --- | --- | --- | --- |
-| `NFL-Multi-Opto-v2.0.py` | NFL Classic, N lineups | 9 (QB/2RB/3WR/TE/FLEX/DST) | CBC (`PULP_CBC_CMD`) | newest `DraftKings NFL DFS Projections*.csv` in Downloads, or path as argv |
+| `NFL-Multi-Opto-v2.0.py` | NFL Classic, N lineups | 9 (QB/2RB/3WR/TE/FLEX/DST) | HiGHS (`pulp.HiGHS`, needs `highspy`) | newest `DraftKings NFL DFS Projections*.csv` in Downloads, or path as argv |
 | `NFL-SD-Multi-Opto-v1.0.py` | NFL Showdown (Captain Mode), N lineups | 6 (1 CPT + 5 FLEX) | HiGHS (`pulp.HiGHS`, needs `highspy`) | newest `DK NFL Showdown Projections*.csv` in Downloads, or path as argv |
 | `NBA-Multi-Opto-v1.0.py` | NBA, N lineups | 8 | CBC | auto-globbed files |
 | `NBA-Single-Opto-v1.0.py` | NBA, 1 lineup | 8 | CBC | auto-globbed files |

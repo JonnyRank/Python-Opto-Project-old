@@ -6,7 +6,7 @@ and maximizes total projected points subject to the salary cap and DraftKings ro
 
 | Script | Format | Roster | Lineups | Solver |
 | --- | --- | --- | --- | --- |
-| `NFL-Multi-Opto-v2.0.py` | Classic | QB, 2 RB, 3 WR, TE, FLEX, DST (9) | Many | CBC |
+| `NFL-Multi-Opto-v2.0.py` | Classic | QB, 2 RB, 3 WR, TE, FLEX, DST (9) | Many | HiGHS |
 | `NFL-SD-Multi-Opto-v1.0.py` | Showdown (Captain Mode) | 1 CPT + 5 FLEX (6) | Many | HiGHS |
 
 (The repo also contains two older NBA scripts. They are configured by editing constants at
@@ -19,9 +19,9 @@ python -m venv venv
 venv/Scripts/python.exe -m pip install -r requirements.txt
 ```
 
-Requirements: `pandas`, `pulp`, `highspy`, `tzdata`. The Showdown optimizer needs `highspy`;
-the Classic optimizer uses the CBC solver that ships with PuLP. `tzdata` supplies the Eastern
-time zone late swap reads kickoffs in (Windows has no built-in zone database).
+Requirements: `pandas`, `pulp`, `highspy`, `tzdata`. Both optimizers solve with HiGHS, so
+`highspy` is required. `tzdata` supplies the Eastern time zone late swap reads kickoffs in
+(Windows has no built-in zone database).
 
 ## Running
 

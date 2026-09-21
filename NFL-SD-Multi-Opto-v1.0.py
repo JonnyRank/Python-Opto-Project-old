@@ -20,10 +20,11 @@ projections CSV whose path is given as the first argument (a file, not a
 folder).
 
 Input Arguments:
-    python NFL-SD-Multi-Opto-v1.0.py ["path"] -n -u -e -l -x -ms -c -pj -dk
-    python <script> <proj file (optional)> <# of lineups> <min uniques> <export to CSV> <lock players> <exclude players> <max salary> <optimize on ceiling> <optimize on 50/50 proj+ceiling> <DKEntries file path>
+    python NFL-SD-Multi-Opto-v1.0.py ["path"] -n -u -e -l -x -ms -mns -c -pj -dk
+    python <script> <proj file (optional)> <# of lineups> <min uniques> <export to CSV> <lock players> <exclude players> <max salary> <minimum salary> <optimize on ceiling> <optimize on 50/50 proj+ceiling> <DKEntries file path>
     # Means: python <script> <projections file> -n <number of lineups> -u <min uniques> -e <export to CSV>
     python NFL-SD-Multi-Opto-v1.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -e -l "Drake Maye:CPT" -ms 49800
+    python NFL-SD-Multi-Opto-v1.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -ms 49800 -mns 49000
     python NFL-SD-Multi-Opto-v1.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -c
     python NFL-SD-Multi-Opto-v1.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -pj
     python NFL-SD-Multi-Opto-v1.0.py "C:\\path\\to\\projections.csv" -n 5 -e -dk "C:\\path\\to\\DKEntries.csv"
@@ -51,7 +52,7 @@ Key Features:
 - Models the Captain and FLEX slots as separate binary decisions per player.
 - Uses the HiGHS solver (via highspy) through PuLP to solve each lineup.
 - Optimizes on projection, ceiling, or a 50/50 blend of the two.
-- Enforces constraints for salary cap, max salary, roster composition,
+- Enforces constraints for salary cap, max and min salary, roster composition,
   both-teams representation, and lineup diversity.
 - Slot-aware ownership: the Captain contributes its CPT ownership and each FLEX
   contributes (Total Own - CPT Own), so the printed total is true product
@@ -943,6 +944,16 @@ def main() -> None:
             f"the ${SALARY_CAP:,} DraftKings cap are clamped to the cap."
         ),
     )
+    parser.add_argument(
+        "-mns",
+        "--min-salary",
+        type=int,
+        default=0,
+        help=(
+            "Minimum total lineup salary (default: no floor). It must not "
+            "exceed --max-salary."
+        ),
+    )
     # The scoring target the solver maximizes. Passing neither flag keeps the
     # long-standing projection-only behavior.
     target_group = parser.add_mutually_exclusive_group()
@@ -987,6 +998,13 @@ def main() -> None:
             )
         if max_salary <= 0:
             raise ValueError("--max-salary must be a positive number.")
+        if args.min_salary < 0:
+            raise ValueError("--min-salary cannot be negative.")
+        if args.min_salary > max_salary:
+            raise ValueError(
+                f"--min-salary ${args.min_salary:,} cannot exceed the lineup's "
+                f"maximum salary of ${max_salary:,}."
+            )
 
         target = resolve_optimization_target(args.ceiling, args.projceiling)
         target_label = OPTIMIZATION_TARGETS[target][0]
@@ -1020,16 +1038,19 @@ def main() -> None:
             "Total_Target_Value",
         )
 
-        # Salary Cap (respects --max-salary, which never exceeds the DK cap)
-        prob += (
-            pulp.lpSum(
-                players_dict[i]["CptSalary"] * cpt_vars[i]
-                + players_dict[i]["Salary"] * flex_vars[i]
-                for i in player_indices
-            )
-            <= max_salary,
-            "Salary_Cap",
+        # Salary cap (respects --max-salary, which never exceeds the DK cap)
+        # and the --min-salary floor, bounding the same expression from both
+        # sides so the Captain's 1.5x salary counts once either way. The
+        # default floor of 0 adds no constraint at all.
+        salary_expr = pulp.lpSum(
+            players_dict[i]["CptSalary"] * cpt_vars[i]
+            + players_dict[i]["Salary"] * flex_vars[i]
+            for i in player_indices
         )
+        prob += (salary_expr <= max_salary, "Salary_Cap")
+        if args.min_salary > 0:
+            print(f"\nEnforcing a minimum lineup salary of ${args.min_salary:,}...")
+            prob += (salary_expr >= args.min_salary, "Min_Salary")
         # Exactly one Captain
         prob += (
             pulp.lpSum(cpt_vars[i] for i in player_indices) == 1,
@@ -1163,13 +1184,23 @@ def main() -> None:
                     print(
                         "This means no lineup exists that satisfies the constraints."
                     )
-                    if args.lock or args.exclude or max_salary < SALARY_CAP:
+                    if (
+                        args.lock
+                        or args.exclude
+                        or max_salary < SALARY_CAP
+                        or args.min_salary > 0
+                    ):
                         print(
                             "  Check your --lock / --exclude selections and "
-                            "--max-salary; they are the usual cause."
+                            "--max-salary / --min-salary; they are the usual cause."
                         )
                 else:
                     print(f"Stopped after generating {i} unique lineups.")
+                    if args.min_salary > 0:
+                        print(
+                            f"  The ${args.min_salary:,} --min-salary floor shrinks "
+                            f"the pool; lowering it yields more lineups."
+                        )
                 break
 
             captain_idx = next(

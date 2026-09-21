@@ -11,12 +11,13 @@ The script is run from the command line. It optimizes on the newest
 projections CSV whose path is given as the first argument.
 
 Input Arguments:
-    python NFL-Multi-Opto-v2.0.py ["path"] -n -u -e -te -x -l -s -srb -ndo -c -pj -sf -ls -dk
-    python <script> <proj file (optional)> <# of lineups> <min uniques> <max TE> <exclude> <export to CSV> <lock players> <stack QB with WR/TE> <stack QB with RB> <no DST vs Opp> <optimize on ceiling> <optimize on 50/50 proj+ceiling> <use small-field ownership> <late swap DKEntries.csv> <DKEntries file path>
+    python NFL-Multi-Opto-v2.0.py ["path"] -n -u -e -te -x -l -s -srb -ndo -mns -c -pj -sf -ls -dk
+    python <script> <proj file (optional)> <# of lineups> <min uniques> <max TE> <exclude> <export to CSV> <lock players> <stack QB with WR/TE> <stack QB with RB> <no DST vs Opp> <minimum salary> <optimize on ceiling> <optimize on 50/50 proj+ceiling> <use small-field ownership> <late swap DKEntries.csv> <DKEntries file path>
     python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -e -l "Josh Allen" -s -ndo
     python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -c
     python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -pj
-    python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -ls -u 2
+    python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -n 5 -u 2 -mns 49500
+    python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -ls -u 2 -mns 49500
     python NFL-Multi-Opto-v2.0.py "C:\\path\\to\\projections.csv" -n 5 -e -dk "C:\\path\\to\\DKEntries.csv"
     python NFL-Multi-Opto-v2.0.py -n 5 -u 2 -e
 
@@ -44,8 +45,14 @@ Late Swap (-ls / --late-swap):
     enforced between entries of the same contest only. All entries are written
     to Downloads\\upload-ready-DKEntries-<timestamp>.csv (with "-early" or
     "-late" before the timestamp for those slates), each cell holding
-    DraftKings' own "Name + ID" text. -l, -x, -s, -srb, -te, -ndo, -c, -pj and
-    -sf apply; -n and -e do not.
+    DraftKings' own "Name + ID" text. -l, -x, -s, -srb, -te, -ndo, -mns, -c,
+    -pj and -sf apply; -n and -e do not.
+
+Minimum Salary (-mns / --min-salary):
+    Requires each lineup to spend at least the given total salary; omitted,
+    there is no floor. With --late-swap the floor covers the whole entry, so
+    the locked players' salary counts toward it, and an entry that cannot
+    reach it is rebuilt without the floor rather than left unchanged.
 
 Optimization Targets:
     (default)               Maximize total projection.
@@ -79,8 +86,8 @@ Key Features:
 - Identifies unique games to enforce the "at least two games" rule.
 - Uses the HiGHS solver (via highspy) through PuLP to solve each lineup.
 - Optimizes on projection, ceiling, or a 50/50 blend of the two.
-- Enforces constraints for salary cap, roster composition (QB, RB, WR, TE, FLEX, DST),
-  and lineup diversity.
+- Enforces constraints for salary cap, an optional salary floor, roster
+  composition (QB, RB, WR, TE, FLEX, DST), and lineup diversity.
 - Prints a well-formatted, human-readable optimal lineup.
 - Seats the latest-kickoff player in FLEX, using the Game Info times in the
   DraftKings entries file (skipped when there is none).
@@ -1310,6 +1317,7 @@ def optimize_late_swap_entry(
     args: argparse.Namespace,
     lock_ids: Set[int],
     previous: List[FrozenSet[int]],
+    min_salary: int,
     solver: pulp.LpSolver,
 ) -> Optional[List[int]]:
     """
@@ -1336,6 +1344,9 @@ def optimize_late_swap_entry(
             min_uniques).
         lock_ids: IDs from -l; forced in wherever they fit an open slot.
         previous: Lineups already built for this contest, for -u.
+        min_salary: Salary floor for the whole entry, 0 for none. The locked
+            players' salary counts toward it, so only the shortfall is asked
+            of the open slots.
         solver: The HiGHS solver from build_solver(), shared by every entry.
 
     Returns:
@@ -1366,11 +1377,13 @@ def optimize_late_swap_entry(
     prob += pulp.lpSum(target_value(projections[i], target) * pick[i] for i in fits)
 
     locked_players = [pool[i] for i in locked_ids]
-    prob += (
-        pulp.lpSum(fits[i].salary * pick[i] for i in fits)
-        <= SALARY_CAP - sum(p.salary for p in locked_players),
-        "Salary_Cap",
-    )
+    locked_salary = sum(p.salary for p in locked_players)
+    open_salary = pulp.lpSum(fits[i].salary * pick[i] for i in fits)
+    prob += (open_salary <= SALARY_CAP - locked_salary, "Salary_Cap")
+    # The floor covers the whole entry, so the locked slots' salary counts
+    # toward it; a floor they already clear constrains nothing.
+    if min_salary - locked_salary > 0:
+        prob += (open_salary >= min_salary - locked_salary, "Min_Salary")
     prob += pulp.lpSum(pick[i] for i in fits) == len(open_labels), "Open_Slots"
 
     # Every open positional slot needs its own position; the FLEX surplus must
@@ -1625,6 +1638,11 @@ def run_late_swap(
         f"Clock: {now:%m/%d/%Y %I:%M%p} ET. {len(entries)} entries across "
         f"{len(contests)} contest(s)."
     )
+    if args.min_salary:
+        print(
+            f"Salary floor: ${args.min_salary:,} per entry, locked players "
+            f"included; dropped for an entry that cannot reach it."
+        )
     if args.num_lineups != 1 or args.export:
         print(
             "  NOTE: -n and -e do not apply to --late-swap; every entry is "
@@ -1701,12 +1719,18 @@ def run_late_swap(
             previous = history[entry.contest_id]
             seated: Optional[Dict[int, DkPoolPlayer]] = None
 
-            # First with -u against this contest's earlier entries, then,
-            # if that is infeasible, without it.
-            for relaxed, prev in enumerate([previous, []] if previous else [[]]):
+            # The full rules first, then one rule at a time dropped: -u
+            # outranks the salary floor, so the floor is given up first, and
+            # the entry is only left unchanged when nothing solves at all.
+            attempts = [
+                (prev, floor)
+                for prev in ([previous, []] if previous else [[]])
+                for floor in ([args.min_salary, 0] if args.min_salary else [0])
+            ]
+            for prev, floor in attempts:
                 picks = optimize_late_swap_entry(
                     open_labels, locked_ids, pool, candidates, projections,
-                    target, args, lock_ids, prev, solver,
+                    target, args, lock_ids, prev, floor, solver,
                 )
                 if picks is None:
                     continue
@@ -1718,11 +1742,20 @@ def run_late_swap(
                         "the optimizer found a lineup the seating step could not "
                         "place (a bug); entry left unchanged."
                     )
-                elif relaxed:
-                    note = (
-                        f"could not differ by {args.min_uniques} from every earlier "
-                        f"entry in this contest; built without that rule."
-                    )
+                else:
+                    dropped = []
+                    if previous and not prev:
+                        dropped.append(
+                            f"could not differ by {args.min_uniques} from every "
+                            f"earlier entry in this contest"
+                        )
+                    if args.min_salary and not floor:
+                        dropped.append(
+                            f"could not reach the ${args.min_salary:,} salary floor"
+                        )
+                    if dropped:
+                        rules = "those rules" if len(dropped) > 1 else "that rule"
+                        note = f"{'; '.join(dropped)}; built without {rules}."
                 break
 
             if seated is None:
@@ -1848,6 +1881,16 @@ def main() -> None:
         help="Maximum number of TEs allowed in a lineup (e.g., 1 to ban TE in FLEX).",
     )
     parser.add_argument(
+        "-mns",
+        "--min-salary",
+        type=int,
+        default=0,
+        help=(
+            "Minimum total lineup salary (default: no floor). Applies to "
+            "--late-swap too, where locked players count toward the floor."
+        ),
+    )
+    parser.add_argument(
         "-sf",
         "--small-field",
         action="store_true",
@@ -1897,6 +1940,15 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
+        # Argument validation, before anything is read from disk.
+        if args.min_salary < 0:
+            raise ValueError("--min-salary cannot be negative.")
+        if args.min_salary > SALARY_CAP:
+            raise ValueError(
+                f"--min-salary ${args.min_salary:,} exceeds the "
+                f"${SALARY_CAP:,} DraftKings salary cap."
+            )
+
         # 1. Load and prepare data
         target = resolve_optimization_target(args.ceiling, args.projceiling)
         target_label = OPTIMIZATION_TARGETS[target][0]
@@ -1953,14 +2005,15 @@ def main() -> None:
             "Total_Target_Value",
         )
 
-        # Salary Cap
-        prob += (
-            pulp.lpSum(
-                players_dict[i]["Salary"] * player_vars[i] for i in player_indices
-            )
-            <= SALARY_CAP,
-            "Salary_Cap",
+        # Salary Cap, and the -mns floor on the same quantity. The default
+        # floor of 0 adds no constraint at all.
+        salary_expr = pulp.lpSum(
+            players_dict[i]["Salary"] * player_vars[i] for i in player_indices
         )
+        prob += (salary_expr <= SALARY_CAP, "Salary_Cap")
+        if args.min_salary > 0:
+            print(f"\nEnforcing a minimum lineup salary of ${args.min_salary:,}...")
+            prob += (salary_expr >= args.min_salary, "Min_Salary")
         # Roster Size
         prob += (
             pulp.lpSum(player_vars[i] for i in player_indices) == ROSTER_SIZE,
@@ -2132,8 +2185,18 @@ def main() -> None:
                     print(
                         "This means no lineup exists that satisfies the base constraints."
                     )
+                    if args.min_salary > 0:
+                        print(
+                            f"  A ${args.min_salary:,} --min-salary floor is a "
+                            f"common cause; try lowering it."
+                        )
                 else:
                     print(f"Stopped after generating {i} unique lineups.")
+                    if args.min_salary > 0:
+                        print(
+                            f"  The ${args.min_salary:,} --min-salary floor shrinks "
+                            f"the pool; lowering it yields more lineups."
+                        )
                 break
 
             # Extract and store the new lineup

@@ -54,6 +54,9 @@ python NFL-Multi-Opto-v2.0.py "C:\path\to\projections.csv" -n 20 -u 2 -s -ndo -e
 # 20 Showdown lineups with a locked Captain and a little salary left on the table
 python NFL-SD-Multi-Opto-v1.0.py "C:\path\to\showdown.csv" -n 20 -u 2 -l "Drake Maye:CPT" -ms 49800 -e
 
+# 20 Classic lineups that must spend at least $49,500 of the cap
+python NFL-Multi-Opto-v2.0.py "C:\path\to\projections.csv" -n 20 -u 2 -mns 49500 -e
+
 # 20 Classic lineups built for upside instead of median points
 python NFL-Multi-Opto-v2.0.py "C:\path\to\projections.csv" -n 20 -u 2 -c -e
 
@@ -96,6 +99,7 @@ Without an entries file the FLEX goes to the cheapest player of that position, a
 | `-srb`, `--stack-rb` | Require the QB to be paired with an RB from his own team |
 | `-te`, `--max-te` | Cap the number of TEs, e.g. `-te 1` to keep a TE out of the FLEX |
 | `-ndo`, `--no-dst-opp` | Never roster a DST alongside a QB/RB/WR/TE from the opposing team |
+| `-mns`, `--min-salary` | Require every lineup to spend at least this much salary (default: no floor); applies to `-ls` too |
 | `-c`, `--ceiling` | Optimize on ceiling instead of projection |
 | `-pj`, `--projceiling` | Optimize on a 50/50 blend of projection and ceiling |
 | `-sf`, `--small-field` | Show small-field ownership instead of large-field (display/export only) |
@@ -116,6 +120,7 @@ prints a warning and is skipped rather than failing the run.
 | `-l`, `--lock` | Players to force into every lineup |
 | `-x`, `--exclude` | Players to keep out of every lineup |
 | `-ms`, `--max-salary` | Cap total lineup salary below $50,000 (values above the cap are clamped) |
+| `-mns`, `--min-salary` | Require every lineup to spend at least this much salary (default: no floor); it must not exceed `-ms` |
 | `-c`, `--ceiling` | Optimize on ceiling instead of projection |
 | `-pj`, `--projceiling` | Optimize on a 50/50 blend of projection and ceiling |
 | `-dk`, `--dk-entries` | DraftKings entries CSV for the upload rows, instead of the newest `DKEntries*.csv` in Downloads |
@@ -294,9 +299,13 @@ python NFL-Multi-Opto-v2.0.py "C:\path\to\projections.csv" -ls -u 2
   may end up identical. When locked players alone already make two entries overlap more than
   `-u` allows, the new picks must all differ. If an entry can't meet `-u` at all, it is built
   without it and the script says so.
-* **Rules** — `-l`, `-x`, `-s`, `-srb`, `-te`, `-ndo`, `-c`, `-pj` and `-sf` apply to the new
-  picks. `-n` and `-e` are ignored. An entry with no swap that fits the cap and your rules is
+* **Rules** — `-l`, `-x`, `-s`, `-srb`, `-te`, `-ndo`, `-mns`, `-c`, `-pj` and `-sf` apply to the
+  new picks. `-n` and `-e` are ignored. An entry with no swap that fits the cap and your rules is
   written back unchanged, with a note.
+* **Salary floor** — `-mns` covers the whole entry, locked players included, so only the salary
+  left over is asked of the open slots. An entry that can't reach the floor is swapped without it
+  rather than left alone, and the note says so. `-u` outranks the floor: the floor is the first
+  rule given up when both can't hold.
 * **Output** — `upload-ready-DKEntries-<timestamp>.csv` in Downloads
   (`upload-ready-DKEntries-early-<timestamp>.csv` / `-late-` for those slates), holding every entry
   (changed or not) in DraftKings' upload layout. Each cell is DraftKings' own `Name + ID`
@@ -309,6 +318,8 @@ slot), `MOVE` (already on the lineup, new slot), or `NEW` (swapped in).
 
 Each solved lineup adds a constraint forbidding it from reappearing, so the pool shrinks as
 the run goes on. If the first lineup can't be built at all, the constraints are contradictory —
-usually conflicting locks, too many exclusions, or a `-ms` value that's too low. If the run
-stops partway through, the slate simply has no more lineups that satisfy your `-u` setting;
-lower `-u` or loosen the stacking flags.
+usually conflicting locks, too many exclusions, a `-ms` value that's too low, or a `-mns` floor
+that's too high. If the run
+stops partway through, the slate has no more lineups that satisfy your `-u` setting or your
+`-mns` floor; lower `-u`, lower the floor, or loosen the stacking flags. Both messages name the
+floor when one is set.

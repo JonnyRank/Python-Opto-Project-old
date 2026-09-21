@@ -1940,7 +1940,7 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        # 1. Load and prepare data
+        # Argument validation, before anything is read from disk.
         if args.min_salary < 0:
             raise ValueError("--min-salary cannot be negative.")
         if args.min_salary > SALARY_CAP:
@@ -1948,6 +1948,8 @@ def main() -> None:
                 f"--min-salary ${args.min_salary:,} exceeds the "
                 f"${SALARY_CAP:,} DraftKings salary cap."
             )
+
+        # 1. Load and prepare data
         target = resolve_optimization_target(args.ceiling, args.projceiling)
         target_label = OPTIMIZATION_TARGETS[target][0]
 
@@ -2003,24 +2005,15 @@ def main() -> None:
             "Total_Target_Value",
         )
 
-        # Salary Cap
-        prob += (
-            pulp.lpSum(
-                players_dict[i]["Salary"] * player_vars[i] for i in player_indices
-            )
-            <= SALARY_CAP,
-            "Salary_Cap",
+        # Salary Cap, and the -mns floor on the same quantity. The default
+        # floor of 0 adds no constraint at all.
+        salary_expr = pulp.lpSum(
+            players_dict[i]["Salary"] * player_vars[i] for i in player_indices
         )
-        # Salary Floor (-mns); the default 0 leaves the model untouched
+        prob += (salary_expr <= SALARY_CAP, "Salary_Cap")
         if args.min_salary > 0:
             print(f"\nEnforcing a minimum lineup salary of ${args.min_salary:,}...")
-            prob += (
-                pulp.lpSum(
-                    players_dict[i]["Salary"] * player_vars[i] for i in player_indices
-                )
-                >= args.min_salary,
-                "Min_Salary",
-            )
+            prob += (salary_expr >= args.min_salary, "Min_Salary")
         # Roster Size
         prob += (
             pulp.lpSum(player_vars[i] for i in player_indices) == ROSTER_SIZE,
@@ -2199,6 +2192,11 @@ def main() -> None:
                         )
                 else:
                     print(f"Stopped after generating {i} unique lineups.")
+                    if args.min_salary > 0:
+                        print(
+                            f"  The ${args.min_salary:,} --min-salary floor shrinks "
+                            f"the pool; lowering it yields more lineups."
+                        )
                 break
 
             # Extract and store the new lineup

@@ -1038,27 +1038,19 @@ def main() -> None:
             "Total_Target_Value",
         )
 
-        # Salary Cap (respects --max-salary, which never exceeds the DK cap)
-        prob += (
-            pulp.lpSum(
-                players_dict[i]["CptSalary"] * cpt_vars[i]
-                + players_dict[i]["Salary"] * flex_vars[i]
-                for i in player_indices
-            )
-            <= max_salary,
-            "Salary_Cap",
+        # Salary cap (respects --max-salary, which never exceeds the DK cap)
+        # and the --min-salary floor, bounding the same expression from both
+        # sides so the Captain's 1.5x salary counts once either way. The
+        # default floor of 0 adds no constraint at all.
+        salary_expr = pulp.lpSum(
+            players_dict[i]["CptSalary"] * cpt_vars[i]
+            + players_dict[i]["Salary"] * flex_vars[i]
+            for i in player_indices
         )
-        # Salary Floor (--min-salary); the default 0 leaves the model untouched
+        prob += (salary_expr <= max_salary, "Salary_Cap")
         if args.min_salary > 0:
-            prob += (
-                pulp.lpSum(
-                    players_dict[i]["CptSalary"] * cpt_vars[i]
-                    + players_dict[i]["Salary"] * flex_vars[i]
-                    for i in player_indices
-                )
-                >= args.min_salary,
-                "Min_Salary",
-            )
+            print(f"Enforcing a minimum lineup salary of ${args.min_salary:,}.")
+            prob += (salary_expr >= args.min_salary, "Min_Salary")
         # Exactly one Captain
         prob += (
             pulp.lpSum(cpt_vars[i] for i in player_indices) == 1,
@@ -1204,6 +1196,11 @@ def main() -> None:
                         )
                 else:
                     print(f"Stopped after generating {i} unique lineups.")
+                    if args.min_salary > 0:
+                        print(
+                            f"  The ${args.min_salary:,} --min-salary floor shrinks "
+                            f"the pool; lowering it yields more lineups."
+                        )
                 break
 
             captain_idx = next(

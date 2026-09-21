@@ -320,5 +320,6 @@ Each solved lineup adds a constraint forbidding it from reappearing, so the pool
 the run goes on. If the first lineup can't be built at all, the constraints are contradictory —
 usually conflicting locks, too many exclusions, a `-ms` value that's too low, or a `-mns` floor
 that's too high. If the run
-stops partway through, the slate simply has no more lineups that satisfy your `-u` setting;
-lower `-u` or loosen the stacking flags.
+stops partway through, the slate has no more lineups that satisfy your `-u` setting or your
+`-mns` floor; lower `-u`, lower the floor, or loosen the stacking flags. Both messages name the
+floor when one is set.

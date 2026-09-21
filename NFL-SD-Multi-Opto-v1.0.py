@@ -1049,7 +1049,7 @@ def main() -> None:
         )
         prob += (salary_expr <= max_salary, "Salary_Cap")
         if args.min_salary > 0:
-            print(f"Enforcing a minimum lineup salary of ${args.min_salary:,}.")
+            print(f"\nEnforcing a minimum lineup salary of ${args.min_salary:,}...")
             prob += (salary_expr >= args.min_salary, "Min_Salary")
         # Exactly one Captain
         prob += (

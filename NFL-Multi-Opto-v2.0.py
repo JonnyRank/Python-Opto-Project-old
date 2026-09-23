@@ -1516,6 +1516,52 @@ def _seat_open_slots(
     return seated if len(seated) == len(open_slots) else None
 
 
+def _keep_original_slots(
+    open_slots: List[int],
+    slot_labels: List[str],
+    original_ids: List[Optional[int]],
+    picks: List[DkPoolPlayer],
+    seated: Dict[int, DkPoolPlayer],
+) -> Dict[int, DkPoolPlayer]:
+    """
+    Leaves kept players in the slots they already hold where that costs nothing.
+
+    _seat_open_slots() orders players by kickoff and salary, so on its own it
+    can shuffle two kept WRs between slots and report an unchanged lineup as a
+    swap. This seats every kept player in his original slot and only the new
+    picks in the slots that were vacated. That seating wins unless it puts an
+    earlier kickoff in FLEX than `seated` does -- a later FLEX is worth a real
+    reorder, since it keeps a swap open once the earlier game has started.
+
+    Returns:
+        The stay-put seating when it is valid and gives up no FLEX kickoff,
+        else `seated` unchanged.
+    """
+    pick_ids = {p.dk_id for p in picks}
+    stay_put = {
+        idx: next(p for p in picks if p.dk_id == original_ids[idx])
+        for idx in open_slots
+        if original_ids[idx] in pick_ids
+    }
+    kept_ids = {p.dk_id for p in stay_put.values()}
+    vacated = [idx for idx in open_slots if idx not in stay_put]
+    fill = _seat_open_slots(
+        vacated, slot_labels, [p for p in picks if p.dk_id not in kept_ids]
+    )
+    if fill is None:
+        return seated
+    stay_put.update(fill)
+
+    def flex_kickoffs(seating: Dict[int, DkPoolPlayer]) -> List[float]:
+        return sorted(
+            p.kickoff.timestamp() if p.kickoff else 0.0
+            for idx, p in seating.items()
+            if slot_labels[idx] == FLEX_SLOT
+        )
+
+    return stay_put if flex_kickoffs(stay_put) >= flex_kickoffs(seated) else seated
+
+
 def _print_late_swap_entry(
     number: int,
     total: int,
@@ -1696,7 +1742,7 @@ def run_late_swap(
 
     history: Dict[str, List[FrozenSet[int]]] = defaultdict(list)
     upload_rows: List[List[str]] = []
-    changed = unchanged_locked = failed = 0
+    changed = reseated = kept = unchanged_locked = failed = 0
 
     for number, entry in enumerate(entries, start=1):
         original_ids, locked, open_slots = _split_entry_slots(entry, pool)
@@ -1734,7 +1780,12 @@ def run_late_swap(
                 )
                 if picks is None:
                     continue
-                seated = _seat_open_slots(open_slots, slot_labels, [pool[i] for i in picks])
+                pick_players = [pool[i] for i in picks]
+                seated = _seat_open_slots(open_slots, slot_labels, pick_players)
+                if seated is not None:
+                    seated = _keep_original_slots(
+                        open_slots, slot_labels, original_ids, pick_players, seated
+                    )
                 if seated is None:
                     # The count identities guarantee a seating, so this means
                     # the model and the seater disagree -- not infeasibility.
@@ -1767,9 +1818,17 @@ def run_late_swap(
             else:
                 for idx, player in seated.items():
                     final_ids[idx] = player.dk_id
+                # A swap means different players. The same players in new
+                # slots is only a reseat, and an unchanged entry was kept.
+                if set(final_ids) != set(original_ids):
+                    changed += 1
+                elif final_ids != original_ids:
+                    reseated += 1
+                    note = note or "same players; the later kickoff moved into FLEX."
+                else:
+                    kept += 1
+                    note = note or "the original lineup is still optimal; no change."
 
-        if final_ids != original_ids:
-            changed += 1
         history[entry.contest_id].append(
             frozenset(i for i in final_ids if i is not None)
         )
@@ -1788,7 +1847,8 @@ def run_late_swap(
         )
 
     print(
-        f"\nLate swap complete: {changed} of {len(entries)} entries changed, "
+        f"\nLate swap complete: {changed} of {len(entries)} entries swapped, "
+        f"{reseated} reseated only, {kept} already optimal, "
         f"{unchanged_locked} fully locked, {failed} with no valid swap."
     )
 

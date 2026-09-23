@@ -314,6 +314,12 @@ python NFL-Multi-Opto-v2.0.py "C:\path\to\projections.csv" -ls -u 2
 Each entry prints with a status per slot: `LOCKED` (game started), `KEEP` (same player, same
 slot), `MOVE` (already on the lineup, new slot), or `NEW` (swapped in).
 
+Players you keep stay in the slots they already hold. The one exception is FLEX: when the same
+players seated differently would put a later kickoff in FLEX, they are reseated, since that keeps
+a swap open after the earlier game starts. The summary counts entries as swapped (different
+players), reseated only (same players, new slots), or already optimal (your original lineup is
+still the best one, so nothing changes).
+
 ## When fewer lineups come back than you asked for
 
 Each solved lineup adds a constraint forbidding it from reappearing, so the pool shrinks as

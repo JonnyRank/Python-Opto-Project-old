@@ -1822,12 +1822,16 @@ def run_late_swap(
                 # slots is only a reseat, and an unchanged entry was kept.
                 if set(final_ids) != set(original_ids):
                     changed += 1
-                elif final_ids != original_ids:
-                    reseated += 1
-                    note = note or "same players; the later kickoff moved into FLEX."
                 else:
-                    kept += 1
-                    note = note or "the original lineup is still optimal; no change."
+                    # Appended, not a fallback: a dropped-rule note must not
+                    # hide that the entry came back unchanged.
+                    if final_ids != original_ids:
+                        reseated += 1
+                        outcome = "same players; the later kickoff moved into FLEX."
+                    else:
+                        kept += 1
+                        outcome = "the original lineup is still optimal; no change."
+                    note = f"{note} {outcome}" if note else outcome
 
         history[entry.contest_id].append(
             frozenset(i for i in final_ids if i is not None)

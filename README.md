@@ -311,7 +311,8 @@ python NFL-Multi-Opto-v2.0.py "C:\path\to\projections.csv" -ls -u 2
   (changed or not) in DraftKings' upload layout. Each cell is DraftKings' own `Name + ID`
   text, `(LOCKED)` tag included, ready to upload on the Edit Entries page.
 
-Each entry prints with a status per slot: `LOCKED` (game started), `KEEP` (same player, same
+Each entry's heading shows Projection, Ceiling and Ownership before -> after the swap, whatever
+the target. Each entry prints with a status per slot: `LOCKED` (game started), `KEEP` (same player, same
 slot), `MOVE` (already on the lineup, new slot), or `NEW` (swapped in).
 
 Players you keep stay in the slots they already hold. The one exception is FLEX: when the same

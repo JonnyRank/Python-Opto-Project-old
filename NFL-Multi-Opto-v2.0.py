@@ -1572,7 +1572,6 @@ def _print_late_swap_entry(
     locked: Set[int],
     pool: Dict[int, DkPoolPlayer],
     projections: Dict[int, Dict[str, Any]],
-    target: str,
     note: str,
 ) -> None:
     """Prints one late-swapped entry with a per-slot LOCKED/KEEP/MOVE/NEW status."""
@@ -1581,26 +1580,31 @@ def _print_late_swap_entry(
         row = projections.get(dk_id) if dk_id is not None else None
         return float(row[column]) if row else 0.0
 
-    def score(ids: List[Optional[int]]) -> float:
-        return sum(target_value(projections[i], target) for i in ids if i in projections)
+    def change(label: str, before: float, after: float, unit: str = "") -> str:
+        return f"{label}: {before:.2f}{unit} -> {after:.2f}{unit} ({after - before:+.2f}{unit})"
 
-    target_label = OPTIMIZATION_TARGETS[target][0]
+    def column_total(ids: List[Optional[int]], column: str) -> float:
+        return sum(stat(i, column) for i in ids)
+
     present = [i for i in final_ids if i is not None]
     salary = sum(pool[i].salary for i in present if i in pool)
-    before, after = score(original_ids), score(final_ids)
-    # The target's before -> after leads; the other totals describe the result.
-    parts = [f"{target_label}: {before:.2f} -> {after:.2f} ({after - before:+.2f})"]
-    parts += [
-        f"{column}: {sum(stat(i, column) for i in present):.2f}"
+    # Projection, Ceiling and Ownership always show before -> after, whatever
+    # the target: points on one line, Ownership and Salary on the next.
+    points = [
+        change(column, column_total(original_ids, column), column_total(final_ids, column))
         for column in ("Projection", "Ceiling")
-        if column != target_label
     ]
-    parts.append(f"Ownership: {sum(stat(i, 'Ownership') for i in present):.2f}%")
-    parts.append(f"Salary: ${salary:,}")
+    ownership = change(
+        "Ownership",
+        column_total(original_ids, "Ownership"),
+        column_total(final_ids, "Ownership"),
+        "%",
+    )
     print(f"\n--- Entry {number}/{total}: {entry.entry_id} | {entry.contest_name} ---")
-    print(" | ".join(parts))
+    print(" | ".join(points))
+    print(f"{ownership} | Salary: ${salary:,}")
     if note:
-        print(f"  NOTE: {note}")
+        print(f"NOTE: {note}")
     print("-" * 97)
     print(
         f"{'Slot':<5} {'Player':<25} {'Pos':<5} {'Team':<5} "
@@ -1691,7 +1695,7 @@ def run_late_swap(
         )
     if args.num_lineups != 1 or args.export:
         print(
-            "  NOTE: -n and -e do not apply to --late-swap; every entry is "
+            "NOTE: -n and -e do not apply to --late-swap; every entry is "
             "re-optimized and written to the upload file."
         )
 
@@ -1711,7 +1715,7 @@ def run_late_swap(
     started_locks = sorted(pool[i].name for i in lock_ids if i in pool and pool[i].started)
     if started_locks:
         print(
-            f"  NOTE: Games have started for {', '.join(started_locks)}; they "
+            f"NOTE: Games have started for {', '.join(started_locks)}; they "
             f"stay only in the entries that already roster them."
         )
     if args.exclude:
@@ -1736,7 +1740,7 @@ def run_late_swap(
         if len(unprojected) > 5:
             names += f", +{len(unprojected) - 5} more"
         print(
-            f"  NOTE: {len(unprojected)} unstarted player(s) have no projection "
+            f"NOTE: {len(unprojected)} unstarted player(s) have no projection "
             f"and cannot be swapped in: {names}"
         )
 
@@ -1847,7 +1851,7 @@ def run_late_swap(
         )
         _print_late_swap_entry(
             number, len(entries), entry, slot_labels, final_ids, original_ids,
-            locked, pool, projections, target, note,
+            locked, pool, projections, note,
         )
 
     print(
